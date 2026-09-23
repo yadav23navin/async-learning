@@ -2580,3 +2580,17 @@ Timing:
 
 8.779 ms
 
+N+1 version
+
+1 query → fetch 50 work items
+50 queries → fetch labels for each work item
+Total: 51 queries
+
+Batched version
+
+1 query → fetch 50 work items
+1 query → fetch labels for all 50 items using IN (...)
+Total: 2 queries
+
+The query count dropped from 51 to 2 because the per-item label queries were replaced with one batched query.
+
