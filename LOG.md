@@ -2870,3 +2870,251 @@ BUILD / SHIP completed
 ☑ Re-ran concurrent update test.
 ☑ Proved the second writer is rejected.
 ☑ Verified no transaction spans a network call.
+
+
+Cmmd run along with result 
+1. Check project directory
+
+Command:
+
+cd ~/Documents/async-learning
+
+Result:
+
+Project directory opened successfully.
+2. Run the initial race script
+
+Command:
+
+node scripts/race.mjs
+
+Result:
+
+Writer A read: Add tests for notifications
+Writer B read: Add tests for notifications
+
+Final row:
+{ id: '1', title: 'Writer A edit' }
+
+Writer A edit: Writer A edit
+Writer B edit: Writer B edit
+One edit was overwritten by the other.
+
+What this proved:
+
+Both writers read the same original value and then updated the same row concurrently. One writer's edit was overwritten by the other, proving the lost update.
+
+3. Try connecting to PostgreSQL
+
+Command:
+
+psql -U minitrack -d minitrack
+
+Result:
+
+FATAL:  Peer authentication failed for user "minitrack"
+4. Connect using localhost/password authentication
+
+Command:
+
+psql -h localhost -U minitrack -d minitrack
+
+Result:
+
+Password for user minitrack:
+
+Entered password:
+
+minitrack
+
+Successfully entered PostgreSQL:
+
+minitrack=#
+5. Check existing databases
+
+Command:
+
+\l
+
+Result:
+
+minitrack
+postgres
+taskflow
+template0
+template1
+6. Check tables
+
+Command:
+
+\dt
+
+Result:
+
+activities
+comments
+labels
+organizations
+project_members
+projects
+users
+work_item_labels
+work_items
+7. Add the version column
+
+Command:
+
+ALTER TABLE work_items
+ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+
+Result:
+
+ALTER TABLE
+8. Verify the version column
+
+Command:
+
+SELECT id, title, version
+FROM work_items
+WHERE id = 1;
+
+Result:
+
+ id |      title      | version
+----+-----------------+---------
+  1 | Writer A edit   |       1
+
+This confirmed that the version column was added successfully.
+
+9. Check the complete work_items structure
+
+Command:
+
+\d work_items
+
+Result:
+
+The table showed:
+
+id           bigint
+project_id   bigint
+assignee_id  bigint
+title        text
+description  text
+status       text
+priority     text
+created_at   timestamp
+updated_at   timestamp
+version      integer NOT NULL DEFAULT 1
+
+Indexes included:
+
+work_items_pkey
+idx_work_items_assignee_id
+idx_work_items_project_created_at
+10. Update scripts/race.mjs
+
+The original lost-update implementation was kept commented out.
+
+The new active implementation uses:
+
+UPDATE work_items
+SET title = $1,
+    version = version + 1
+WHERE id = $2
+  AND version = $3
+RETURNING id, title, version;
+
+The important part is:
+
+AND version = $3
+
+Only the writer that still has the latest version can update the row.
+
+11. Run the protected race script
+
+Command:
+
+node scripts/race.mjs
+
+Result:
+
+Writer A read: Writer B edit
+Writer B read: Writer B edit
+Writer B → 409 Conflict
+Message: This item was changed by someone else. Please refresh and try again.
+Final row: { id: '1', title: 'Writer A edit', version: 3 }
+
+What this proved:
+
+Writer A successfully updated the row and increased the version.
+
+Writer B tried to update using the old version, so:
+
+rowCount = 0
+
+and the script reported:
+
+409 Conflict
+
+The second writer could no longer silently overwrite the first writer's change.
+
+12. Create migration file
+
+File:
+
+migrations/004_add_work_item_version.sql
+
+Contents:
+
+ALTER TABLE work_items
+ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+
+The column was already added manually to the current database, so the migration records the schema change for the project.
+
+13. Check for transactions and network calls
+
+Command:
+
+grep -RniE "BEGIN|COMMIT|ROLLBACK|fetch\(|axios|https?://" . --exclude-dir=node_modules --exclude-dir=.git
+
+Relevant result:
+
+./scripts/attack.sh:3:URL="http://localhost:3000/validation"
+./scripts/seed.mjs:142:        await client.query("BEGIN");
+./scripts/seed.mjs:428:        await client.query("COMMIT");
+./scripts/seed.mjs:438:        await client.query("ROLLBACK");
+
+Other matches were URLs inside documentation/package files.
+
+No fetch() or axios call was found inside the database transaction.
+
+Result:
+
+No transaction in the codebase spans a network call to another service.
+14. Final Day 7 BUILD / SHIP result
+Before:
+Two concurrent writers
+        ↓
+Both read version 1
+        ↓
+Both update
+        ↓
+One edit gets overwritten
+        ↓
+LOST UPDATE ❌
+
+After:
+Two concurrent writers
+        ↓
+Both read version 1
+        ↓
+First writer updates → version becomes 2
+        ↓
+Second writer tries version 1
+        ↓
+Version mismatch
+        ↓
+409 Conflict
+        ↓
+No silent overwrite 
