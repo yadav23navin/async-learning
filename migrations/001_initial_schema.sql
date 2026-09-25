@@ -106,7 +106,7 @@ CREATE TABLE activities (
             'commented',
             'label_added'
         )),
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,                             {/* allows you to store structured JSON data.  */}
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     FOREIGN KEY (project_id)

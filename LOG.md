@@ -2594,3 +2594,279 @@ Total: 2 queries
 
 The query count dropped from 51 to 2 because the per-item label queries were replaced with one batched query.
 
+
+
+
+
+# Day 7 — BUILD / SHIP
+## Transactions, races & concurrent writes
+
+### Goal
+
+Write `scripts/race.mjs` to reproduce a lost update using two concurrent writers, then fix the race using optimistic locking with a `version` column and compare-and-set.
+
+---
+
+## 1. Created the race script
+
+File:
+
+```text
+scripts/race.mjs
+
+The script creates two PostgreSQL clients:
+
+const clientA = createClient();
+const clientB = createClient();
+
+await clientA.connect();
+await clientB.connect();
+
+Both clients target the same work item:
+
+const workItemId = 1;
+2. Reproduced the lost update
+
+Both writers first read the same row:
+
+const resultA = await clientA.query(
+    `SELECT id, title FROM work_items WHERE id = $1`,
+    [workItemId]
+);
+
+const resultB = await clientB.query(
+    `SELECT id, title FROM work_items WHERE id = $1`,
+    [workItemId]
+);
+
+Then both updates were fired concurrently:
+
+const updateA = clientA.query(
+    `UPDATE work_items
+     SET title = $1
+     WHERE id = $2`,
+    ["Writer A edit", workItemId]
+);
+
+const updateB = clientB.query(
+    `UPDATE work_items
+     SET title = $1
+     WHERE id = $2`,
+    ["Writer B edit", workItemId]
+);
+
+await Promise.all([updateA, updateB]);
+Command
+node scripts/race.mjs
+Output
+Writer A read: Add tests for notifications
+Writer B read: Add tests for notifications
+
+Final row:
+{ id: '1', title: 'Writer A edit' }
+
+Writer A edit: Writer A edit
+Writer B edit: Writer B edit
+One edit was overwritten by the other.
+Result
+
+The lost update was successfully reproduced.
+
+Both writers read the same original value, but one writer's update overwrote the other writer's update.
+
+3. Added the version column
+
+Connected to PostgreSQL using:
+
+psql -h localhost -U minitrack -d minitrack
+
+Added the column:
+
+ALTER TABLE work_items
+ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+
+Verified it:
+
+SELECT id, title, version
+FROM work_items
+WHERE id = 1;
+
+Output:
+
+1 | Writer A edit | 1
+
+Also verified the schema using:
+
+\d work_items
+
+The work_items table now contains:
+
+version | integer | not null | default 1
+4. Added migration file
+
+Created:
+
+migrations/004_add_work_item_version.sql
+
+Contents:
+
+ALTER TABLE work_items
+ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+
+The database column had already been added manually during the experiment, so the migration file records the schema change for the project.
+
+5. Added compare-and-set
+
+The update was changed from:
+
+UPDATE work_items
+SET title = $1
+WHERE id = $2;
+
+to:
+
+UPDATE work_items
+SET title = $1,
+    version = version + 1
+WHERE id = $2
+  AND version = $3
+RETURNING id, title, version;
+
+The important part is:
+
+AND version = $3
+
+The writer can only update the row if the version it originally read is still current.
+
+6. Updated race.mjs
+
+Both writers now read:
+
+SELECT id, title, version
+FROM work_items
+WHERE id = $1;
+
+Writer A:
+
+const updateA = clientA.query(
+    `UPDATE work_items
+     SET title = $1,
+         version = version + 1
+     WHERE id = $2
+       AND version = $3
+     RETURNING id, title, version`,
+    ["Writer A edit", workItemId, resultA.rows[0].version]
+);
+
+Writer B:
+
+const updateB = clientB.query(
+    `UPDATE work_items
+     SET title = $1,
+         version = version + 1
+     WHERE id = $2
+       AND version = $3
+     RETURNING id, title, version`,
+    ["Writer B edit", workItemId, resultB.rows[0].version]
+);
+
+Both still execute concurrently:
+
+const [resultUpdateA, resultUpdateB] = await Promise.all([
+    updateA,
+    updateB
+]);
+7. Added 409 Conflict handling
+
+If an update affects zero rows:
+
+if (resultUpdateB.rowCount === 0) {
+    console.log("Writer B → 409 Conflict");
+    console.log(
+        "Message: This item was changed by someone else. Please refresh and try again."
+    );
+}
+
+The same handling exists for Writer A because either writer can lose depending on timing.
+
+In the real API, this would be an actual HTTP 409 Conflict. The script prints the expected application behavior.
+
+8. Re-ran the race
+Command
+node scripts/race.mjs
+Output
+Writer A read: Writer B edit
+Writer B read: Writer B edit
+Writer B → 409 Conflict
+Message: This item was changed by someone else. Please refresh and try again.
+
+Final row:
+{ id: '1', title: 'Writer A edit', version: 3 }
+Result
+
+The race is now protected.
+
+Writer A successfully updated the row and incremented the version.
+
+Writer B still had the old version, so:
+
+AND version = $3
+
+failed to match the row.
+
+Therefore Writer B updated zero rows and received a 409 Conflict instead of silently overwriting Writer A's change.
+
+9. Verified transaction/network-call requirement
+
+Ran:
+
+grep -RniE "BEGIN|COMMIT|ROLLBACK|fetch\(|axios|https?://" . --exclude-dir=node_modules --exclude-dir=.git
+
+Relevant transaction output:
+
+./scripts/seed.mjs:142:        await client.query("BEGIN");
+./scripts/seed.mjs:428:        await client.query("COMMIT");
+./scripts/seed.mjs:438:        await client.query("ROLLBACK");
+
+No fetch() or axios call was found in the project source.
+
+The transaction in scripts/seed.mjs is database-only and does not span a network call to another service.
+
+10. Final BUILD / SHIP result
+Before
+Two writers
+    ↓
+Both read same data
+    ↓
+Both update
+    ↓
+One silently overwrites the other
+    ↓
+Lost update
+After
+Two writers
+    ↓
+Both read same version
+    ↓
+First writer updates + increments version
+    ↓
+Second writer uses old version
+    ↓
+UPDATE matches 0 rows
+    ↓
+409 Conflict
+    ↓
+No silent overwrite
+Files added/changed
+scripts/race.mjs
+migrations/004_add_work_item_version.sql
+
+
+BUILD / SHIP completed
+☑ Reproduced lost update.
+☑ Added version column.
+☑ Added compare-and-set update.
+☑ Added 409 conflict handling.
+☑ Re-ran concurrent update test.
+☑ Proved the second writer is rejected.
+☑ Verified no transaction spans a network call.
