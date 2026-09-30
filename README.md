@@ -252,3 +252,47 @@ Work Items → Activities = 1:N
 Users → Comments = 1:N
 Users → Activities = 1:N
 Users → Work Items = 1:N through assignee_id
+
+
+==========================================================================================================================================================================================================================================================================================================
+# day 9
+## Work Item Endpoints
+### Pagination
+
+The `/work-items` endpoint supports both offset and cursor pagination.
+
+#### Offset pagination
+
+Use offset pagination when you need a specific page number or when working with relatively small/developing datasets.
+
+```bash
+curl "http://localhost:3000/work-items?page=2&limit=50"
+
+Response:
+
+{
+  "data": [],
+  "page": 2,
+  "limit": 50,
+  "total": 500000,
+  "total_pages": 10000
+}
+Cursor pagination
+
+Use cursor pagination when paging through large or frequently changing datasets. It avoids the deep-offset performance problem and is stable when new rows are inserted while paging.
+
+First request:
+
+curl "http://localhost:3000/work-items?limit=50"
+
+Then use the returned next_cursor:
+
+curl "http://localhost:3000/work-items?limit=50&cursor=<next_cursor>"
+
+Response:
+
+{
+  "data": [],
+  "next_cursor": "<next_cursor>",
+  "has_more": true
+}

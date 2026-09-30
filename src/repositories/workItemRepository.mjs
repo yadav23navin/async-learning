@@ -59,6 +59,7 @@ export default createWorkItemRepository; */}
 
 import pg from "pg";
 import {Buffer} from "node:buffer";
+import AppError from "../AppError.mjs";
 
 const { Client } = pg;
 
@@ -67,8 +68,16 @@ const encodeCursor = ({created_at, id}) => {
 };
 
 const decodeCursor =(cursor) => {
+    try{
     const decoded = Buffer.from(cursor, "base64url").toString("utf-8");
     return JSON.parse(decoded);
+}catch{
+    throw new AppError(
+        "Invalid cursor",
+        400,
+        "BAD_REQUEST"
+    )
+}
 };
 
 

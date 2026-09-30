@@ -25,6 +25,20 @@ const createWorkItemController = ({ workItemService }) => {
 
     // this will now support pagination and sorting, so it can pass page, limit, and sort parameters to the service
     const findAll = async (req, res) => {
+        if (req.query.cursor) {
+    const limit = Number(req.query.limit) || 50;
+
+    const result = await workItemService.findAllCursor({
+        cursor: req.query.cursor,
+        limit
+    });
+
+    return res.json({
+        data: result.rows,
+        next_cursor: result.nextCursor,
+        has_more: result.hasMore
+    });
+}
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 50;
     // this will allow sort to use an allowlist of valid sort expressions

@@ -4,7 +4,8 @@ const displayMessages = {
     FORBIDDEN: "You are not allowed to perform this action.",
     NOT_FOUND: "The requested resource was not found.",
     CONFLICT: "This action conflicts with existing data.",
-    INTERNAL_ERROR: "Something went wrong. Please try again later."
+    INTERNAL_ERROR: "Something went wrong. Please try again later.",
+    BAD_REQUEST: "Invalid request"
 };
 
 export default displayMessages;
