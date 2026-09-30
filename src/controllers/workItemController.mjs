@@ -14,14 +14,71 @@ const createWorkItemController = ({ workItemService }) => {
         });
     };
 
-    const findAll = (req, res) => {
-        const workItems = workItemService.findAll();
+    {/*const findAll = async(req, res) => {
+        const workItems = await workItemService.findAll();
 
         res.json({
             success: true,
             workItems
         });
-    };
+    };   */}
+
+    // this will now support pagination and sorting, so it can pass page, limit, and sort parameters to the service
+    const findAll = async (req, res) => {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 50;
+    // this will allow sort to use an allowlist of valid sort expressions
+    // (earlier sort was being inserted directly into the SQL query, which is a potential SQL injection vulnerability )
+    const sortOptions = {
+    created_at_desc: "created_at DESC, id DESC",
+    created_at_asc: "created_at ASC, id ASC"
+};
+    const sort = sortOptions[req.query.sort] || "created_at DESC, id DESC";
+
+    {/*const workItems = await workItemService.findAll({
+        page,
+        limit,
+        sort
+    });
+
+    res.json({
+        success: true,
+        workItems
+    });
+};  */}
+
+// this will now support pagination and sorting,
+//  so it can pass page, limit, and sort parameters to the service
+
+const result = await workItemService.findAll({
+        page,
+        limit,
+        sort
+    });
+
+    res.json({
+        data: result.rows,
+        page,
+        limit,
+        total: result.total,
+        total_pages: Math.ceil(result.total / limit)
+    });
+};
+const findAllCursor = async (req, res) => {
+    const limit = Number(req.query.limit) || 50;
+    const cursor = req.query.cursor || null;
+
+    const result = await workItemService.findAllCursor({
+        cursor,
+        limit
+    });
+
+    res.json({
+        data: result.rows,
+        next_cursor: result.nextCursor,
+        has_more: result.hasMore
+    });
+};
 
     const findById = (req, res) => {
         const workItem = workItemService.findById(
@@ -62,7 +119,9 @@ const createWorkItemController = ({ workItemService }) => {
         findAll,
         findById,
         update,
-        remove
+        remove,
+        findAllCursor
+
     };
 };
 

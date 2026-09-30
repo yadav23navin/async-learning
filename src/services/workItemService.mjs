@@ -25,9 +25,18 @@ const createWorkItemService = ({
         return workItemRepository.create(workItem);
     };
 
-    const findAll = () => {
-        return workItemRepository.findAll();
+    const findAll =async ({page,limit,sort}) => {
+        return await workItemRepository.findAll({
+            page, limit, sort                                  // now service will support pagination and sorting, so it can pass page, limit, and sort parameters to the repository    
+        });
     };
+
+    const findAllCursor = async ({ cursor, limit }) => {
+    return await workItemRepository.findAllCursor({
+        cursor,
+        limit
+    });
+};
 
     const findById = (id) => {
         const workItem = workItemRepository.findById(id);
@@ -82,7 +91,8 @@ const createWorkItemService = ({
         findAll,
         findById,
         update,
-        remove
+        remove,
+        findAllCursor
     };
 };
 

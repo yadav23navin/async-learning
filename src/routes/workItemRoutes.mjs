@@ -23,6 +23,10 @@ router.get(
 );
 
 router.get(
+    "/work-items/cursor",
+    workItemController.findAllCursor
+);
+router.get(
     "/work-items/:id",
     workItemController.findById
 );
