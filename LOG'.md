@@ -396,3 +396,808 @@ GET /work-items/cursor?cursor=&limit=
 
 The cursor endpoint successfully paged through 500,200 rows across 10,004 pages with zero duplicate IDs during the concurrent-insert test.
 
+
+==================================================================================================================================================================
+
+# Day 10
+
+# Elasticsearch Day 10 Log
+
+## Elasticsearch Setup
+
+- Elasticsearch version: 9.5.3
+- Index: `work_items`
+- PostgreSQL work_items loaded: 500,300
+- Elasticsearch documents: 500,300
+
+## Analyzer Tests
+
+### 1. Real Title
+
+Input:
+`Fix frontend issue in task creation`
+
+Tokens:
+```text
+fix
+frontend
+issue
+in
+task
+creation
+
+What happened:
+The standard analyzer split the title into individual words and lowercased Fix to fix.
+
+2. Real Title
+
+Input:
+Improve user management performance
+
+Tokens:
+
+improve
+user
+management
+performance
+
+What happened:
+The standard analyzer split the title into individual words and lowercased Improve to improve.
+
+3. Punctuation and Hashtag
+
+Input:
+Fix Login Bug #123!
+
+Tokens:
+
+fix
+login
+bug
+123
+
+What happened:
+The standard analyzer lowercased the words, removed punctuation such as # and !, and kept 123 as a token.
+
+4. Hyphenated Word
+
+Input:
+Fix login-related issue
+
+Tokens:
+
+fix
+login
+related
+issue
+
+What happened:
+The standard analyzer split the hyphenated word login-related into login and related, and lowercased Fix.
+
+5. Emoji
+
+Input:
+Fix login issue 🚀
+
+Tokens:
+
+fix
+login
+issue
+🚀
+
+What happened:
+The standard analyzer lowercased the words and kept the emoji 🚀 as its own token.
+
+
+===================================================================================================================================================================
+# Day 11 — Elasticsearch Mapping
+
+## Explicit Strict Mapping
+
+Created a new index:
+
+`work_items_v2`
+
+The index uses an explicit mapping with:
+
+- `dynamic: strict`
+- `title` → `text` with `keyword` subfield
+- `description` → `text`
+- `state` → `keyword`
+- `assignee_id` → `keyword`
+- `project_id` → `keyword`
+- `labels` → `nested`
+  - `id` → `keyword`
+  - `name` → `keyword`
+- `priority` → `keyword`
+- `due_date` → `date` with `epoch_millis`
+- `created_at` → `date` with `epoch_millis`
+- `points` → `integer`
+
+## Reindex
+
+The existing `work_items` index contained 500,300 documents.
+
+During reindexing:
+
+- `status` was renamed to `state`
+- `created_at` was converted from ISO date format to epoch milliseconds
+- `id`, `updated_at`, and `version` were removed because they were not part of the new mapping
+- Missing fields such as `labels`, `due_date`, and `points` were omitted
+
+Reindex result:
+
+```text
+total: 500300
+created: 500300
+failures: []
+
+The new index therefore contains all 500,300 documents.
+
+Dynamic Strict Test
+
+A document containing an unknown field was deliberately indexed:
+
+{
+  "title": "Strict mapping test",
+  "unexpected_field": "this should fail"
+}
+
+Elasticsearch rejected it with:
+
+{
+  "error": {
+    "root_cause": [
+      {
+        "type": "strict_dynamic_mapping_exception",
+        "reason": "[3:25] mapping set to strict, dynamic introduction of [unexpected_field] within [_doc] is not allowed"
+      }
+    ],
+    "type": "strict_dynamic_mapping_exception",
+    "status": 400
+  }
+}
+
+What this proves:
+
+dynamic: strict prevents Elasticsearch from automatically adding unknown fields to the mapping. Instead, unexpected fields cause the document to be rejected immediately.
+
+Object vs Nested
+
+To demonstrate the difference, the same label data was tested using both object and nested.
+
+The data was:
+
+{
+  "labels": [
+    {
+      "name": "bug",
+      "color": "blue"
+    },
+    {
+      "name": "feature",
+      "color": "red"
+    }
+  ]
+}
+Object Mapping
+
+The first demo index used:
+
+"labels": {
+  "type": "object"
+}
+
+Query:
+
+{
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "term": {
+            "labels.name": "bug"
+          }
+        },
+        {
+          "term": {
+            "labels.color": "red"
+          }
+        }
+      ]
+    }
+  }
+}
+
+This query asks for a label where:
+
+name = bug
+
+AND
+
+color = red
+
+But the actual data contains:
+
+bug → blue
+
+feature → red
+
+The object mapping flattens the values, so Elasticsearch can incorrectly combine values from different array elements.
+
+Result:
+
+1 document matched
+
+This is the object flattening problem.
+
+Nested Mapping
+
+The same data was indexed into nested_demo, where labels is mapped as:
+
+"labels": {
+  "type": "nested"
+}
+
+The query uses a nested query:
+
+{
+  "query": {
+    "nested": {
+      "path": "labels",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "term": {
+                "labels.name": "bug"
+              }
+            },
+            {
+              "term": {
+                "labels.color": "red"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
+Result:
+
+{
+  "value": 0,
+  "relation": "eq"
+}
+
+This is the correct result because there is no single label where:
+
+name = bug AND color = red
+
+The nested mapping preserves the relationship between fields inside each array element.
+
+Day 11 Result
+
+Explicit strict mapping was created and the existing 500,300 documents were successfully reindexed.
+
+The strict mapping rejected an unknown field as expected.
+
+The object vs nested test demonstrated that object mapping can produce a false match when querying multiple fields inside an array of objects, while nested mapping correctly preserves the relationship between fields.
+
+
+=====================================================================================================================================================================================
+
+## Day 12 — Query DSL & Filters
+
+### Combined query
+
+The combined ES query uses:
+
+- `multi_match` on `title` and `description` for text search.
+- `term` filter for `state`.
+- `term` filter for `assignee_id`.
+- `term` filter for `priority`.
+- `range` filter for `created_at`.
+
+The text search is placed in `must` because it requires relevance scoring.
+
+The yes/no conditions are placed in `filter` because they do not need relevance scoring.
+
+The combined query returned exactly 86 documents.
+
+### must vs filter comparison
+
+Same logical query, searching for `login`, with:
+- state = `done`
+- assignee_id = `18`
+- priority = `high`
+- created_at between `1790143930831` and `1790746098398`
+
+Everything in `must`:
+- took: 21 ms
+- matches: 86
+
+Text search in `must` and yes/no conditions in `filter`:
+- took: 12 ms
+- matches: 86
+
+In this run, the correctly split query was 9 ms faster.
+
+`took` is Elasticsearch's internal query execution time in milliseconds and can vary between runs.
+
+### Cache effect
+
+The correctly split query was run twice:
+
+- First run: 12 ms
+- Second run: 10 ms
+
+The second run was faster, showing the effect of warmed/cached execution. Elasticsearch query time can still vary between runs because of system conditions.
+
+================================================================================================================================================================================================================================================================================
+
+{
+day 12
+## Day 12 — Query DSL & Filters
+
+### Query DSL and filter context
+
+The ES list query uses query context only where relevance matters and filter context for yes/no conditions.
+
+Text search uses `multi_match` on:
+- `title`
+- `description`
+
+The following conditions are placed inside `filter` because they do not require relevance scoring:
+- `state`
+- `assignee_id`
+- `priority`
+- `created_at` range
+- `labels`
+
+### Individual filters
+
+#### State filter
+
+Used `term` on the `state` keyword field.
+
+Example:
+
+```json
+{
+  "term": {
+    "state": "done"
+  }
+}
+Assignee filter
+
+Used term on assignee_id.
+
+Tested with:
+
+assignee_id = 18
+Priority filter
+
+Used term on priority.
+
+Tested with:
+
+priority = high
+Date range filter
+
+Used range on created_at.
+
+Tested range:
+
+gte = 1790143930831
+lte = 1790746098398
+Labels filter
+
+Labels are mapped as nested because a work item can have multiple labels and the relationship between label fields must be preserved.
+
+Example:
+
+{
+  "nested": {
+    "path": "labels",
+    "query": {
+      "term": {
+        "labels.name": "backend"
+      }
+    }
+  }
+}
+
+The backend label matched exactly:
+
+83,113 work items
+Combined query
+
+The final combined query contains:
+
+text search: login
+state: done
+assignee_id: 18
+priority: high
+created_at between 1790143930831 and 1790746098398
+label: backend
+
+The text search is in must.
+
+All yes/no conditions are in filter.
+
+The combined query returned:
+
+17 documents
+must vs filter comparison
+
+Same logical query, searching for login, with:
+
+state = done
+assignee_id = 18
+priority = high
+created_at between 1790143930831 and 1790746098398
+
+Everything in must:
+
+took: 21 ms
+matches: 86
+
+Text search in must and yes/no conditions in filter:
+
+first run: 12 ms
+second run: 10 ms
+matches: 86
+
+The correctly split query was faster in these runs.
+
+The second run was faster than the first, showing the effect of warmed/cached execution. took can vary between runs depending on system conditions.
+
+_source filtering
+
+Restricted _source to the fields needed by the list:
+
+[
+  "title",
+  "description",
+  "state",
+  "assignee_id",
+  "priority",
+  "created_at"
+]
+
+This prevents Elasticsearch from returning unnecessary document fields.
+
+Empty filter array
+
+Tested:
+
+{
+  "query": {
+    "bool": {
+      "filter": []
+    }
+  }
+}
+
+Elasticsearch treats an empty filter array as having no filtering conditions, so it can match all documents.
+
+This is important when building queries dynamically: application code must explicitly handle an empty filter list according to the endpoint's intended behavior instead of assuming filter: [] restricts results.
+
+Day 12 result
+
+Implemented and tested:
+
+text search
+state filter
+assignee filter
+priority filter
+date range filter
+nested labels filter
+combined query
+query vs filter comparison
+cache/warm execution comparison
+_source filtering
+empty filter behavior
+}
+
+
+====================================================================================================================================================================================================================================
+##day 13
+
+
+## Dashboard Aggregation: Default Size vs. Correct Size
+
+### Objective
+
+Demonstrate how Elasticsearch's `terms` aggregation can return only a subset of distinct values when the `size` parameter is omitted, and fix it by explicitly setting the required bucket count.
+
+### Test Setup
+
+* Index: `dashboard_assignee_test`
+* Documents indexed: 40
+* Distinct assignees: 40 (`user_1` through `user_40`)
+* Aggregation field: `assignee_id.keyword`
+
+### 1. Broken Aggregation — Default Size
+
+Query:
+
+```json
+{
+  "size": 0,
+  "aggs": {
+    "by_assignee": {
+      "terms": {
+        "field": "assignee_id.keyword"
+      }
+    }
+  }
+}
+```
+
+**Observed output:**
+
+```json
+{
+  "bucket_count": 10,
+  "doc_count_error_upper_bound": 0
+}
+```
+
+Only 10 buckets were returned even though the index contains 40 distinct assignees. The default `terms` aggregation size is 10, so the other 30 assignees were omitted from the response.
+
+### 2. Corrected Aggregation — Explicit Size
+
+Query:
+
+```json
+{
+  "size": 0,
+  "aggs": {
+    "by_assignee": {
+      "terms": {
+        "field": "assignee_id.keyword",
+        "size": 20
+      }
+    }
+  }
+}
+```
+
+**Observed output:**
+
+```json
+{
+  "bucket_count": 20,
+  "doc_count_error_upper_bound": 0
+}
+```
+
+Setting `size: 20` returns 20 buckets instead of 10. This fixes the default-size truncation for the requested top 20 assignees. It does not return all 40; to request all 40 in this test, set `size: 40`.
+
+### 3. Understanding `doc_count_error_upper_bound`
+
+Both aggregation responses returned:
+
+```json
+"doc_count_error_upper_bound": 0
+```
+
+This means Elasticsearch reports no bucket document-count error for these results.
+
+* `0`: no count error is reported.
+* Positive value: bucket document counts may be underestimated by up to the reported bound.
+* `-1`: Elasticsearch cannot provide a finite upper bound, which deserves investigation if accurate counts are required.
+
+**Important:** A zero error bound does not mean every distinct value was returned. The default aggregation still returned only 10 of the 40 assignees. Bucket truncation and document-count error are different issues.
+
+### Conclusion
+
+The default `terms` aggregation size can silently omit buckets when there are more distinct values than the configured size. Explicitly setting `size` to the required number of buckets prevents this specific truncation, while `doc_count_error_upper_bound` helps assess the accuracy of returned bucket counts.
+
+
+======================================================================================================================================================================================================================================================================================================
+
+#day 14
+# Day 14
+
+## Bulk Indexing, Partial Failures, Retries, and Update by Query
+
+### Objective
+
+Build a reliable Elasticsearch bulk indexer that loads 100,000 documents in batches, detects partial failures, collects failed document IDs and reasons, retries retryable failures once, and uses `update_by_query` with Painless to backfill missing priorities.
+
+### Test Setup
+
+* Source database: PostgreSQL (`minitrack`)
+* Source table: `work_items`
+* Target index: `work_items_bulk_lab`
+* Target mapping: `dynamic: strict`
+* Batch size: 2,000 documents
+* Total documents processed: 100,000
+* Intentionally poisoned documents: 50
+* Poisoned field: `points` (mapped as `integer`)
+
+### 1. Bulk Indexing — Batch Processing
+
+The indexer reads documents from PostgreSQL in batches of 2,000 using keyset pagination:
+
+```sql
+WHERE id > $1
+ORDER BY id
+LIMIT $2
+```
+
+Each batch is sent to Elasticsearch using the Bulk API. The indexer continues through all batches until 100,000 documents have been processed.
+
+**Observed output:**
+
+```text
+Processed 2000/100000
+Processed 4000/100000
+...
+Processed 98000/100000
+Processed 100000/100000
+```
+
+Batch processing avoids sending all 100,000 documents in one enormous request and allows progress to be tracked.
+
+### 2. Deliberate Mapping Failures — Poisoned Documents
+
+To test partial failure handling, the first 50 documents were deliberately given an invalid value for `points`:
+
+```json
+{
+  "points": "not-an-integer"
+}
+```
+
+The mapping defines `points` as an integer, so Elasticsearch rejected these documents with HTTP 400 mapping errors.
+
+**Observed summary:**
+
+```text
+Documents read: 100000
+Indexed successfully: 99950
+Successful operations: 99950
+Failed operations: 50
+Retried operations: 0
+Failure IDs collected: 50
+Expected poisoned failures: 50
+
+PASS: 99,950 documents indexed; 50 poisoned documents rejected.
+```
+
+The indexer collected each failed document's ID, status, and error reason. The reported failures were IDs `1` through `50`, and the reasons identified the invalid `points` value.
+
+This proves that the indexer can continue processing valid documents even when some items in a bulk request fail.
+
+### 3. Understanding `response.errors` and Retries
+
+The Bulk API response includes an `errors` flag that indicates whether any individual operation failed.
+
+The indexer checks this flag after every initial bulk request and examines individual item results when errors occur.
+
+It retries only retryable HTTP statuses:
+
+* `429`: Too many requests.
+* `502`: Bad gateway.
+* `503`: Service unavailable.
+* `504`: Gateway timeout.
+
+Each retryable item is retried once. Permanent mapping errors, such as HTTP 400, are recorded rather than retried.
+
+**Observed result:** zero retries were needed because all 50 deliberately poisoned documents failed due to permanent mapping errors.
+
+**Important:** An HTTP-successful bulk request does not guarantee that every document was indexed successfully. Individual item results must also be checked.
+
+### 4. Backfilling Missing Priorities with `update_by_query`
+
+The goal was to set `priority` to `"medium"` only for documents where the field was missing.
+
+First, five test documents (`51` through `55`) had their `priority` fields removed using `update_by_query`.
+
+The backfill then used this query to find documents without the field:
+
+```json
+{
+  "query": {
+    "bool": {
+      "must_not": [
+        {
+          "exists": {
+            "field": "priority"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+A Painless script added the missing value:
+
+```painless
+if (!ctx._source.containsKey("priority")) {
+    ctx._source.priority = "medium";
+} else {
+    ctx.op = "noop";
+}
+```
+
+The request used `refresh=true` so the changes would be searchable when it completed.
+
+**Observed output:**
+
+```json
+{
+  "total": 5,
+  "updated": 5,
+  "deleted": 0,
+  "version_conflicts": 0,
+  "failures": []
+}
+```
+
+All five documents were updated successfully. A subsequent count query returned:
+
+```json
+{
+  "count": 0
+}
+```
+
+This confirms that no documents remained without `priority`. Fetching document `51` also confirmed that its `_source` contained:
+
+```json
+{
+  "priority": "medium"
+}
+```
+
+### 5. Understanding Version Conflicts
+
+A version conflict can occur when a document changes after Elasticsearch searches for it but before the update is applied. For example, another request may update the same document concurrently.
+
+Using `conflicts=proceed` with `update_by_query` tells Elasticsearch to continue processing other documents when version conflicts occur instead of aborting the operation.
+
+It does not automatically resolve the conflicting document. Conflicts should be inspected, and any skipped documents that still require updating may need another pass.
+
+The successful backfill above reported zero version conflicts. The `conflicts=proceed` behavior should be understood separately from the successful no-conflict run.
+
+### Conclusion
+
+This exercise demonstrated reliable bulk indexing, partial failure detection, error collection, selective retries, and missing-field backfills in Elasticsearch.
+
+The poisoned run indexed 99,950 documents and rejected exactly 50 documents with recorded reasons. The priority backfill updated five test documents to `"medium"`, and verification confirmed that zero documents remained without a priority.
+
+Key lessons:
+
+* Process large datasets in manageable batches.
+* Check `response.errors` and individual item results for every bulk request.
+* Retry transient failures once, but do not blindly retry permanent mapping errors.
+* Collect failed IDs and reasons for diagnosis and recovery.
+* Use `update_by_query` with Painless to update documents matching a precise condition.
+* Understand that `conflicts=proceed` skips version conflicts and continues; it does not guarantee every document was updated.
+
+======================================================================================================================================================================================================================================================================================================
+#Day 15
+
+### Full CSV Export and Memory Test
+
+- **Endpoint:** `GET /export`
+- **Dataset:** 500,300 work items
+- **HTTP status:** 200 OK
+- **CSV rows:** 500,301 (including the header)
+- **CSV size:** approximately 122 MiB
+- **Export duration:** 60.32 seconds
+- **Initial RSS:** 130,140 KB
+- **Peak RSS:** 133,872 KB
+- **Final RSS:** 133,288 KB
+- **Peak RSS increase:** 3,732 KB (approximately 3.64 MiB)
+
+**Conclusion:** The full export completed successfully. RSS remained relatively stable throughout the export, increasing by approximately 3.64 MiB at its peak. This supports the use of streaming and bounded batches rather than buffering the entire CSV in application memory. These are results from one run, so further runs would strengthen the conclusion.

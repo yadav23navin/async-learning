@@ -18,6 +18,17 @@ import createWorkItemService from "./services/workItemService.mjs";
 import createWorkItemController from "./controllers/workItemController.mjs";
 import createWorkItemRoutes from "./routes/workItemRoutes.mjs";
 import logger from "./logger.mjs";
+import createDashboardRepository from "./repositories/dashboardRepository.mjs";
+import createDashboardService from "./services/dashboardService.mjs";
+import createDashboardController from "./controllers/dashboardController.mjs";
+import createDashboardRoutes from "./routes/dashboardRoutes.mjs";
+import createSearchRepository from "./repositories/searchRepository.mjs";
+import createSearchService from "./services/searchService.mjs";
+import createSearchController from "./controllers/searchController.mjs";
+import createSearchRoutes from "./routes/searchRoutes.mjs";
+import createExportRepository from "./repositories/exportRepository.mjs";
+import createExportService from "./services/exportService.mjs";
+import createExportController from "./controllers/exportController.mjs";
 
 
 const projectRepository = createProjectRepository();                                   // this is responsible for check project repository
@@ -48,6 +59,28 @@ const workItemController = createWorkItemController({
 const workItemRoutes = createWorkItemRoutes({
     workItemController
 });
+
+const dashboardRepository = createDashboardRepository();
+
+const dashboardService = createDashboardService({
+    dashboardRepository
+});
+
+const dashboardController = createDashboardController({
+    dashboardService
+});
+
+const dashboardRoutes = createDashboardRoutes({
+    dashboardController
+});
+
+const searchRepository = createSearchRepository();
+const searchService = createSearchService({ searchRepository });
+const searchController = createSearchController({ searchService });
+const searchRoutes = createSearchRoutes({ searchController });
+const exportRepository = createExportRepository();
+const exportService = createExportService({ exportRepository });
+const exportController = createExportController({ exportService });
 
 const app = express();
 //const tasks = [];
@@ -170,8 +203,12 @@ app.get("/internal-error", (req, res) => {
 });  */}
 app.use("/tasks", taskRoutes);                                     // this is responsible for check task routes
 app.use("/projects", projectRoutes);                                 // this is responsible for check project routes
-app.use("/", workItemRoutes);                              // this is responsible for check work item routes
-app.use(errorHandler);                                            // this is responsible for check error handler
+app.use("/dashboard", dashboardRoutes);                            // this is responsible for check dashboard routes
+app.use("/", workItemRoutes);                                     // this is responsible for check work item routes
+app.use("/search", searchRoutes);                                 // this is responsible for check search routes
+app.get("/export", exportController
+    .exportWorkItems);app.use(errorHandler);                                            // this is responsible for check error handler
+
 
 app.listen(3000, () => {
     console.log("Server running on port 3000");

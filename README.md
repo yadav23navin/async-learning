@@ -1,18 +1,20 @@
 # MiniTrack
 
-MiniTrack is a small Express.js task management API built to practice clean backend architecture.
-
-The project separates responsibilities into layers:
-
-- **Routes** — define HTTP endpoints and middleware.
-- **Controllers** — handle HTTP request/response logic.
-- **Services** — contain business logic.
-- **Repositories** — handle data access.
-- **Validation** — validates incoming request data.
-- **Error handling** — provides consistent API error responses.
-- **Logging** — records HTTP method, URL, status code, and request duration.
+MiniTrack is a task-management API built with Express.js to practice backend architecture, database access, Elasticsearch, pagination, and streaming.
 
 ## Architecture
+
+The application separates responsibilities into layers:
+
+- **Routes:** Define HTTP endpoints.
+- **Controllers:** Handle HTTP requests and responses.
+- **Services:** Contain business logic.
+- **Repositories:** Handle data access.
+- **Validation:** Validate incoming request data.
+- **Error handling:** Return consistent API error responses.
+- **Logging:** Record HTTP method, URL, status code, and request duration.
+
+Request flow:
 
 ```text
 Request
@@ -25,274 +27,129 @@ Service
    ↓
 Repository
    ↓
-In-memory data
+Database / Elasticsearch
+```
 
+## Technologies
 
+- Node.js
+- Express.js
+- PostgreSQL
+- Elasticsearch
+- JavaScript
+- npm
 
+## Elasticsearch Search
 
-## Project Endpoints
+The `GET /search` endpoint supports full-text search, filters, aggregations, and cursor-based pagination.
 
-### Create a project
-
-```bash
-curl -X POST http://localhost:3000/projects \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Website Redesign"}'
-
-
-  Get all projects
-curl http://localhost:3000/projects
-Get a project by ID
-
-Replace 1 with an actual project ID returned from the create request.
-
-curl http://localhost:3000/projects/1
-Update a project
-
-Replace 1 with an actual project ID.
-
-curl -X PATCH http://localhost:3000/projects/1 \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Updated Website Redesign"}'
-Delete a project
-
-Replace 1 with an actual project ID.
-
-curl -X DELETE http://localhost:3000/projects/1
-
-
-
-
-## Work Item Endpoints
-
-### Create a work item
-
-Replace `1` with an actual project ID.
+Example:
 
 ```bash
-curl -X POST http://localhost:3000/projects/1/work-items \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Implement login page"}'
+curl -sS 'http://localhost:3000/search?q=login&size=5'
+```
 
+Supported filters include:
 
+- `state`
+- `assignee_id`
+- `project_id`
+- `priority`
+- Created-date range
+- Nested labels
 
-  Get all work items
-curl http://localhost:3000/work-items
-Get a work item by ID
-
-Replace 1 with an actual work item ID.
-
-curl http://localhost:3000/work-items/1
-Update a work item
-
-Replace 1 with an actual work item ID.
-
-curl -X PATCH http://localhost:3000/work-items/1 \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Implement authentication"}'
-Delete a work item
-
-Replace 1 with an actual work item ID.
-
-curl -X DELETE http://localhost:3000/work-items/1
-
-
-## Task Endpoints
-
-### Create a task
+Example with filters:
 
 ```bash
-curl -X POST http://localhost:3000/tasks \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Review API documentation"}'
+curl -sS 'http://localhost:3000/search?state=done&size=10'
+```
 
-  Get all tasks
-curl http://localhost:3000/tasks
+The response includes matching results, a total-hit count, facet aggregations, and a `nextCursor` when another page is available.
 
-## Validation and Error Handling
+Use the returned cursor for the next page, following the format supported by the endpoint.
 
-### Invalid project request
+## Dashboard
 
-The project name is required.
+The `GET /dashboard` endpoint provides dashboard data through Elasticsearch aggregations.
 
-```bash
-curl -X POST http://localhost:3000/projects \
-  -H "Content-Type: application/json" \
-  -d '{}'
-
-  Expected response:
-
-{
-  "success": false,
-  "status": 400
-}
-Project not found
-curl http://localhost:3000/projects/999999999
-
-Expected response:
-
-{
-  "success": false,
-  "status": 404
-}
-Invalid work item request
-curl -X POST http://localhost:3000/projects/1/work-items \
-  -H "Content-Type: application/json" \
-  -d '{"title":123}'
-
-Expected response:
-
-{
-  "success": false,
-  "status": 400
-}
-
-The API uses centralized error handling so that errors from services and middleware are converted into consistent HTTP responses.
-
-
-
-# day 5
-## Database Schema
-
-```text
-┌──────────────────┐
-│  organizations   │
-├──────────────────┤
-│ id PK            │
-│ name UNIQUE      │
-│ created_at       │
-└────────┬─────────┘
-         │ 1:N
-         ▼
-┌──────────────────┐
-│     projects     │
-├──────────────────┤
-│ id PK            │
-│ organization_id FK
-│ name             │
-│ description      │
-│ status           │
-│ created_at       │
-└──────┬───────────┘
-       │
-       ├─────────────── 1:N ──────────────┐
-       ▼                                  ▼
-┌──────────────────┐              ┌──────────────────┐
-│   work_items     │              │ project_members  │
-├──────────────────┤              ├──────────────────┤
-│ id PK            │              │ project_id FK    │
-│ project_id FK    │              │ user_id FK       │
-│ assignee_id FK   │              │ role             │
-│ title            │              │ joined_at        │
-│ description      │              │ PK(project_id,   │
-│ status           │              │    user_id)      │
-│ priority         │              └────────┬─────────┘
-│ created_at       │                       │
-│ updated_at       │                       │
-└──────┬───────────┘                       │
-       │                                   │
-       │                                   │
-       ├─────────────── 1:N ────────┐      │
-       ▼                            ▼      │
-┌──────────────────┐        ┌──────────────────┐
-│    comments      │        │ work_item_labels │
-├──────────────────┤        ├──────────────────┤
-│ id PK            │        │ work_item_id FK  │
-│ work_item_id FK  │        │ label_id FK      │
-│ user_id FK       │        │ PK(work_item_id, │
-│ body             │        │    label_id)     │
-│ created_at       │        └────────┬─────────┘
-│ updated_at       │                 │
-└──────────────────┘                 │ N:1
-                                     ▼
-                              ┌──────────────────┐
-                              │      labels      │
-                              ├──────────────────┤
-                              │ id PK            │
-                              │ name UNIQUE      │
-                              │ created_at       │
-                              └──────────────────┘
-
-
-┌──────────────────┐
-│      users       │
-├──────────────────┤
-│ id PK            │
-│ name             │
-│ email UNIQUE     │
-│ created_at       │
-└──────────────────┘
-       ▲
-       │
-       ├──── project_members.user_id
-       ├──── work_items.assignee_id
-       └──── comments.user_id
-
-
-┌──────────────────┐
-│    activities    │
-├──────────────────┤
-│ id PK            │
-│ project_id FK    │
-│ work_item_id FK  │
-│ user_id FK       │
-│ action           │
-│ metadata JSONB   │
-│ created_at       │
-└──────────────────┘
-
-Relationship Summary
-Organization → Projects = 1:N
-Projects → Work Items = 1:N
-Users ↔ Projects = N:M through project_members
-Work Items ↔ Labels = N:M through work_item_labels
-Work Items → Comments = 1:N
-Projects → Activities = 1:N
-Work Items → Activities = 1:N
-Users → Comments = 1:N
-Users → Activities = 1:N
-Users → Work Items = 1:N through assignee_id
-
-
-==========================================================================================================================================================================================================================================================================================================
-# day 9
-## Work Item Endpoints
-### Pagination
-
-The `/work-items` endpoint supports both offset and cursor pagination.
-
-#### Offset pagination
-
-Use offset pagination when you need a specific page number or when working with relatively small/developing datasets.
+Example:
 
 ```bash
-curl "http://localhost:3000/work-items?page=2&limit=50"
+curl -sS 'http://localhost:3000/dashboard'
+```
 
-Response:
+## CSV Export
 
-{
-  "data": [],
-  "page": 2,
-  "limit": 50,
-  "total": 500000,
-  "total_pages": 10000
-}
-Cursor pagination
+The `GET /export` endpoint streams matching work items as CSV. It uses Elasticsearch point-in-time (PIT) search and `search_after` pagination to process records in batches.
 
-Use cursor pagination when paging through large or frequently changing datasets. It avoids the deep-offset performance problem and is stable when new rows are inserted while paging.
+Export all work items:
 
-First request:
+```bash
+curl -sS 'http://localhost:3000/export' -o work-items.csv
+```
 
-curl "http://localhost:3000/work-items?limit=50"
+Export matching work items:
 
-Then use the returned next_cursor:
+```bash
+curl -sS 'http://localhost:3000/export?q=login' -o login-work-items.csv
+```
 
-curl "http://localhost:3000/work-items?limit=50&cursor=<next_cursor>"
+The export supports the filters implemented by the search endpoint. CSV values are escaped, and response writes respect stream backpressure.
 
-Response:
+## Pagination and Performance
 
-{
-  "data": [],
-  "next_cursor": "<next_cursor>",
-  "has_more": true
-}
+MiniTrack also includes learning exercises for offset pagination, cursor pagination, and Elasticsearch `search_after`.
+
+The benchmark script is:
+
+```bash
+node scripts/benchmark-search-after.mjs
+```
+
+The benchmark compares search latency at different page depths. Results depend on the machine, dataset, and current system load.
+
+## Data Loading
+
+The `scripts/` directory contains scripts for loading work items and labels into Elasticsearch.
+
+Check the script's options and required environment variables before running a data-loading script.
+
+## Configuration
+
+The application expects Elasticsearch connection settings through environment variables. Configure credentials locally and do not commit secrets.
+
+Example:
+
+```bash
+ES_PASSWORD='your-local-password' npm run dev
+```
+
+Use your own local Elasticsearch password in place of the placeholder.
+
+## Local Development
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+The API runs on port `3000` when configured with the project's current local settings.
+
+## Learning Goals
+
+- Layered backend architecture
+- Database and Elasticsearch access
+- Full-text search and filtering
+- Aggregations and facet counts
+- Cursor pagination and `search_after`
+- Point-in-time searches
+- Streaming CSV responses
+- Backpressure and memory monitoring
+- Performance benchmarking
