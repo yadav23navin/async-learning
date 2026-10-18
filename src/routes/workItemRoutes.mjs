@@ -4,15 +4,17 @@ import {
     createWorkItemSchema,
     updateWorkItemSchema
 } from "../workItemSchemas.mjs";
+import createWorkItemCreateRateLimiter from "../rateLimitWorkItemCreate.mjs";
 //import workItemController from "../controllers/workItemController.mjs";
 
 // now it doesn't call the workItemController directly, instead it will be passed as a dependency
 
-const createWorkItemRoutes = ({ workItemController }) => {
+const createWorkItemRoutes = ({ workItemController, redis, rateLimiter = createWorkItemCreateRateLimiter({ redis }) }) => {
     const router = express.Router();
 
     router.post(
     "/projects/:projectId/work-items",
+    rateLimiter,
     validate(createWorkItemSchema),
     workItemController.create
 );

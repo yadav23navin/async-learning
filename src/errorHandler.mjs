@@ -24,6 +24,8 @@ const errorHandler = (error, req, res, next) => {
         message
     };
 
+    if (error.writeCommitted) response.writeCommitted = true;
+
     if (process.env.NODE_ENV !== "production") {
         response.stack = error.stack;
     }

@@ -1,12 +1,16 @@
 {
   "scripts": {
     "start": "node src/server.mjs",
-    "dev": "node --watch src/server.mjs"
+    "dev": "node --watch src/server.mjs",
+    "stampede": "node scripts/stampede.mjs",
+    "validate:api": "node scripts/validate-day17-api.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@elastic/elasticsearch": "^9.5.1",
     "express": "^5.2.1",
     "pg": "^8.23.0",
+    "redis": "^6.3.0",
     "zod": "^4.6.5"
   }
 }

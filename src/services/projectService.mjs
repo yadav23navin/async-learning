@@ -1,24 +1,37 @@
 import AppError from "../AppError.mjs";
 import escapeHtml from "../sanitize.mjs";
+import { buildInvalidationSet } from "../cacheInvalidation.mjs";
+import { invalidateCacheKeys } from "../cacheInvalidation.mjs";
 
-const createProjectService = ({ projectRepository }) => {
-    const create = (name) => {
-        const sanitizedName = escapeHtml(name);
-
-        const project = {
-            id: Date.now(),
-            name: sanitizedName
-        };
-
-        return projectRepository.create(project);
+const createProjectService = ({ projectRepository, invalidateKeys = invalidateCacheKeys }) => {
+    const invalidateAfterWrite = async (keys) => {
+        try {
+            await invalidateKeys(keys);
+        } catch (cause) {
+            const error = new AppError(
+                "The project write succeeded, but cache invalidation failed. The record is committed; check it before retrying.",
+                503,
+                "CACHE_INVALIDATION_ERROR"
+            );
+            error.writeCommitted = true;
+            error.cause = cause;
+            throw error;
+        }
     };
 
-    const findAll = () => {
+    const create = async (name) => {
+        const sanitizedName = escapeHtml(name);
+        const created = await projectRepository.create({ name: sanitizedName });
+        await invalidateAfterWrite(buildInvalidationSet("project", { id: created.id, operation: "create" }));
+        return created;
+    };
+
+    const findAll = async () => {
         return projectRepository.findAll();
     };
 
-    const findById = (id) => {
-        const project = projectRepository.findById(id);
+    const findById = async (id) => {
+        const project = await projectRepository.findById(id);
 
         if (!project) {
             throw new AppError(
@@ -31,14 +44,14 @@ const createProjectService = ({ projectRepository }) => {
         return project;
     };
 
-    const update = (id, data) => {
+    const update = async (id, data) => {
         const sanitizedData = {};
 
         if (data.name !== undefined) {
             sanitizedData.name = escapeHtml(data.name);
         }
 
-        const project = projectRepository.update(id, sanitizedData);
+        const project = await projectRepository.update(id, sanitizedData);
 
         if (!project) {
             throw new AppError(
@@ -48,11 +61,12 @@ const createProjectService = ({ projectRepository }) => {
             );
         }
 
+        await invalidateAfterWrite(buildInvalidationSet("project", { id, operation: "update" }));
         return project;
     };
 
-    const remove = (id) => {
-        const project = projectRepository.remove(id);
+    const remove = async (id) => {
+        const project = await projectRepository.remove(id);
 
         if (!project) {
             throw new AppError(
@@ -62,6 +76,7 @@ const createProjectService = ({ projectRepository }) => {
             );
         }
 
+        await invalidateAfterWrite(buildInvalidationSet("project", { id, operation: "delete" }));
         return project;
     };
 

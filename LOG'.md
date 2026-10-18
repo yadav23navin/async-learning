@@ -1201,3 +1201,637 @@ Key lessons:
 - **Peak RSS increase:** 3,732 KB (approximately 3.64 MiB)
 
 **Conclusion:** The full export completed successfully. RSS remained relatively stable throughout the export, increasing by approximately 3.64 MiB at its peak. This supports the use of streaming and bounded batches rather than buffering the entire CSV in application memory. These are results from one run, so further runs would strengthen the conclusion.
+
+======================================================================================================================================================================================================================================================================================================
+
+## Day 16 — Cache-Aside Implementation and Benchmark
+
+### Implementation
+
+* Added cache-aside support using Redis through `getOrSetCache`.
+* Added cached reference lookups for project states, labels, and project members.
+* Added caching for successful `GET /work-items` responses with a 60-second TTL.
+* Added cache hit/miss logging and an `X-Cache` response header for the work-items list endpoint.
+* Verified that `/reference/states`, `/reference/labels`, and `/reference/projects/1/members` all return HTTP 200.
+
+### Benchmark
+
+* Endpoint: `GET /work-items?page=1&limit=50`
+* Requests: 100
+* Cache hits: 99
+* Cache misses: 1
+* Cache hit rate: 99%
+* p50 latency before caching: 90.56 ms
+* p50 latency after caching: 1.71 ms
+* p95 latency before caching: 109.00 ms
+* p95 latency after caching: 2.19 ms
+* Redis used memory: 1.09 MB
+* Redis peak memory: 1.10 MB
+
+### Observations
+
+The benchmark showed a substantial reduction in observed request latency when the response was served from Redis. The cache hit rate was 99% after the initial cache miss. Redis memory usage remained approximately 1.09 MB during the measurement.
+
+### Notes
+
+The latency measurements are from a local run and may vary with system load, cache state, and dataset size. The benchmark measures repeated requests for the same list URL; it does not establish performance for every query or workload.
+
+## Day 17 — Cache Invalidation and Stampede Protection
+
+### Database write path repairs
+
+The project lookup bug came from `projectRepository` keeping an empty in-memory array while `work_items.project_id` refers to rows in PostgreSQL. `GET /projects` and `findById()` therefore could not see the PostgreSQL project IDs (including project `1`). The repository now reads and writes the `projects` table. Project creation uses the first configured organization when no organization is supplied because `projects.organization_id` is required; the ID is selected from the database rather than hardcoded.
+
+The PostgreSQL work-item repository also had no `create()` method, although the service called it. It now inserts a row and returns the database-generated ID and columns. Read, update, and delete return their `RETURNING` row or `null`; controllers await async service results. Invalid numeric IDs return `400 BAD_REQUEST` before reaching PostgreSQL.
+
+### Cache keys and invalidation
+
+* Work-item HTTP responses use `http:work-items:v1:<original URL>` with a 60-second TTL. Query variants are separate keys; writes scan and clear the `http:work-items:*` namespace.
+* Search facets use `search:facets:v1`; reference data uses `reference:project-states:v1`, `reference:labels:v1`, and `reference:project-members:<projectId>:v1`.
+* `buildInvalidationSet("workItem", { projectId, operation })` maps create/delete to the list namespace, search facets, and project states. Deletes additionally invalidate that project's member reference. Title-only updates invalidate only the HTTP list namespace.
+* Project deletes clear work-item lists, search facets, and the deleted project's member reference. Project create and name-only update do not invalidate these caches because the current cached values do not depend on those writes.
+* Label writes map to label references and search facets. There is no label write route/repository in the current API. Tasks are currently in-memory and have no cache consumer, so task writes do not invalidate PostgreSQL or search caches.
+* Wildcard invalidation collects the full SCAN result before deleting in batches; it does not use Redis `KEYS` or mutate the keyspace while scanning.
+
+Invalidation runs after each successful database statement returns its row. A database error or a missing-row result does not invalidate caches. If Redis invalidation fails after the database committed, the API returns `503 CACHE_INVALIDATION_ERROR` with `writeCommitted: true` and tells the caller not to retry blindly. The database change remains committed, so stale cache entries may remain until TTL expiry or a successful manual invalidation.
+
+### Stampede protection and measurement
+
+On a cache miss, the caller acquires `lock:<cache-key>` with Redis `SET NX PX`, a 30-second expiry, and a unique token. It fetches and caches a successful result, then releases the lock through an atomic compare-token-and-delete script. Followers poll for the cached value; after a bounded 30-second wait, they use a backend fallback. Redis errors bypass the cache and execute one backend fetch for that request. Failed backend results are not cached. As with any cache, if Redis is unavailable for many simultaneous requests, cache protection is unavailable and backend load can rise.
+
+The benchmark's `workItemListFetches` metric increments immediately before the PostgreSQL list SELECT in `workItemRepository.findAll()`. Development-only endpoints reset/read this process-local counter; the script does not infer backend activity from HTTP headers. The benchmark clears only its URL's cache and lock keys for each round, then restores their original Redis values/TTLs.
+
+Measured on the local app with 200 concurrent requests per round (2026-10-18):
+
+| Mode | Requests | PostgreSQL list fetches | Successes | Failures | Elapsed |
+|---|---:|---:|---:|---:|---:|
+| Lock disabled | 200 | 97 | 97 | 103 | 6,361.8 ms |
+| Lock enabled | 200 | 1 | 200 | 0 | 282.7 ms |
+
+The unlocked run reached PostgreSQL's connection limit (`sorry, too many clients already`); this is the measured failure mode, not a fabricated all-success baseline. The locked run returned 200 successful responses after one list fetch.
+
+### Tests and API validation
+
+* `npm test`: 13 tests passed. They cover concurrent cold misses, separate keys, lock expiry and ownership-safe release, backend/Redis failures, invalidation mappings, multi-cursor wildcard scans, HTTP HIT/MISS behavior, create/update/delete cache refresh, missing/invalid project and work-item IDs, committed-write reporting, and repository row contracts. Database repositories are exercised with injected fake PostgreSQL clients; route-level cache tests use an isolated in-memory Redis adapter.
+* `API_URL=http://localhost:3001 npm run validate:api`: passed against local Redis and PostgreSQL. It created a temporary project and work item, verified project lookup, CRUD, list cache HIT/MISS, query pagination, cursor first-page behavior, invalid ID handling, and cleanup. `GET /work-items/500300` returned HTTP 200. The temporary work item (ID 500303) and project were deleted; a follow-up database query found zero `day17-%` projects or work items.
+* `STAMPEDE_URL='http://localhost:3001/work-items?page=1&limit=50' npm run stampede`: passed its assertions with the measurements above.
+
+### Commands
+
+```sh
+sudo systemctl start postgresql redis-server
+sudo systemctl start elasticsearch
+PORT=3000 NODE_ENV=development npm start
+npm test
+API_URL=http://localhost:3000 npm run validate:api
+STAMPEDE_URL='http://localhost:3000/work-items?page=1&limit=50' npm run stampede
+```
+
+The API uses `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` when provided. Redis uses `REDIS_URL`. The stampede metrics and baseline-bypass header are restricted to non-production mode; run the benchmark only against a local development/test server.
+
+The Elasticsearch-backed reference endpoints were also checked, but returned HTTP 500 because the configured Elasticsearch service at `http://localhost:9200` was unavailable. Start Elasticsearch and ensure index `work_items_v2` exists before retrying `/reference/states`, `/reference/labels`, `/reference/projects/:projectId/members`, or `/search`.
+
+
+# Day 17
+Day 17 — Cache Invalidation, Stampede Protection, and API Validation
+
+1. Objective
+
+Implement PostgreSQL-backed project and work-item CRUD.
+
+Add Redis caching and invalidate cached responses after mutations.
+
+Prevent cache stampedes when many requests arrive simultaneously.
+
+Handle empty-result caching deliberately.
+
+Validate the API and Elasticsearch connectivity.
+
+2. Start the Development Services
+
+Start Elasticsearch
+
+docker start es-local-dev
+
+Check the Elasticsearch version and connectivity:
+
+curl -u 'elastic:<ELASTIC_PASSWORD>' http://localhost:9200
+
+Observed result: Elasticsearch 9.5.3 responded successfully.
+
+Check cluster health:
+
+curl -u 'elastic:<ELASTIC_PASSWORD>' --max-time 10 \
+  'http://localhost:9200/_cluster/health?pretty'
+
+Observed result:
+
+Cluster: docker-cluster
+
+Status: yellow
+
+Nodes: 1
+
+Active primary shards: 74
+
+Unassigned primary shards: 0
+
+Unassigned shards: 10
+
+The yellow status is consistent with a single-node cluster where replica shards cannot be assigned to a second node. All primary shards were active.
+
+Activate the Basic License
+
+The Elasticsearch trial license had expired, causing authenticated requests to return HTTP 403 with a security-license compliance error.
+
+curl -u 'elastic:<ELASTIC_PASSWORD>' \
+  -X POST 'http://localhost:9200/_license/start_basic?acknowledge=true'
+
+Verify the license:
+
+curl -u 'elastic:<ELASTIC_PASSWORD>' \
+  'http://localhost:9200/_license?pretty'
+
+Observed result: License status active, type basic.
+
+List Elasticsearch Indices
+
+curl -u 'elastic:<ELASTIC_PASSWORD>' \
+  'http://localhost:9200/_cat/indices?v'
+
+Observed indices included:
+
+Index
+
+Document count
+
+work_items
+
+500,300
+
+work_items_v2
+
+1,499,560
+
+tasks_aggregation
+
+150
+
+The existing indices remained available after switching the license.
+
+Start Redis
+
+The Docker Redis container could not start because port 6379 was already occupied by a local Redis process.
+
+redis-cli ping
+
+Expected response when Redis is available:
+
+PONG
+
+If the local Redis service is stopped:
+
+sudo systemctl start redis-server
+
+The earlier Docker error was a port conflict, not evidence that Redis itself was unavailable.
+
+3. Start and Validate the API
+
+Start the application:
+
+npm start
+
+Leave the server running in one terminal. In a second terminal, run:
+
+API_URL=http://localhost:3000 npm run validate:api
+
+Observed result:
+
+GET /work-items/500300: HTTP 200
+API validation passed; temporary project and work item 500304 cleaned up.
+
+This confirmed that the API responded successfully and the validation script cleaned up its temporary test records.
+
+Note: using port 3001 initially failed with ECONNREFUSED. The application was subsequently validated successfully on port 3000.
+
+4. PostgreSQL and Repository Fixes
+
+The project lookup and work-item creation paths originally had a datastore mismatch:
+
+Project lookup used an in-memory array.
+
+Work items referenced projects stored in PostgreSQL.
+
+The PostgreSQL work-item repository did not implement create().
+
+The implementation was updated so that project CRUD uses PostgreSQL and work-item CRUD returns database-backed records. Controllers were updated to await asynchronous service calls.
+
+Project creation selects the first configured organization because the API does not currently accept an organization ID.
+
+A direct lookup was also verified:
+
+curl http://localhost:3000/work-items/500300
+
+Observed result: HTTP 200 with a work-item response containing ID 500300.
+
+5. Redis Caching and Invalidation
+
+The implementation introduced or updated:
+
+Shared cache invalidation in src/cacheInvalidation.mjs.
+
+Project mutation invalidation in src/services/projectService.mjs.
+
+Work-item mutation invalidation in src/services/workItemService.mjs.
+
+Work-item response caching in src/cacheWorkItemsResponse.mjs.
+
+General cache and stampede protection in src/cache.mjs.
+
+The reviewed service code routes these write operations through the shared invalidation mechanism:
+
+Project create, update, and delete.
+
+Work-item create, title update, and delete.
+
+The invalidation mechanism uses Redis key deletion internally. This is expected; the important distinction is that services should use the shared invalidation set rather than manually clearing arbitrary cache keys.
+
+Acceptance criterion still requiring a complete code audit: Verify that every cache-affecting mutation uses the shared invalidation set and that every affected cache key is included.
+
+6. Cache Stampede Benchmark
+
+The benchmark script is:
+
+node scripts/stampede.mjs
+
+The following results were reported by the earlier benchmark run:
+
+Metric
+
+Lock disabled
+
+Lock enabled
+
+Concurrent requests
+
+200
+
+200
+
+Backend list queries
+
+97
+
+1
+
+Successful requests
+
+97
+
+200
+
+Failed requests
+
+103
+
+0
+
+Duration
+
+6,361.8 ms
+
+282.7 ms
+
+Database query counts were instrumented at the PostgreSQL list-query boundary.
+
+With locking enabled, 200 concurrent requests required only one backend list query and all 200 requests succeeded. Without locking, the PostgreSQL connection limit was exceeded.
+
+Conclusion: The locked benchmark met the stampede target. The unlocked failures demonstrate the risk of allowing concurrent cache misses to trigger independent database queries.
+
+7. Empty-Result Caching
+
+The source search identified these configured TTLs:
+
+src/cache.mjs: default TTL of 300 seconds.
+
+src/cacheWorkItemsResponse.mjs: TTL of 60 seconds.
+
+A configured TTL alone does not prove that empty results are handled correctly.
+
+Acceptance criterion still requiring verification: Confirm that empty arrays/results are either not cached or receive an intentionally short TTL, with the behavior documented and tested.
+
+8. Automated Tests and Validation
+
+The earlier implementation run reported:
+
+npm test
+13 tests passed
+0 failures
+
+Additional checks reported passing:
+
+git diff --check
+
+Node.js syntax checks
+
+API validation against PostgreSQL and Redis
+
+The API validation was rerun after restoring Elasticsearch access and passed on port 3000.
+
+9. Remaining Work
+
+Complete the audit of all cache-affecting mutation paths.
+
+Verify empty-result caching behavior and add a test if necessary.
+
+Verify Elasticsearch-backed API endpoints after restoring the Basic license.
+
+Rerun npm test and the API validation after any final code changes.
+
+Review git status and the diff before committing.
+
+Suggested commit message after the acceptance criteria are satisfied:
+
+Fix cache invalidation and prevent request stampedes
+
+No commit or push was performed as part of this validation.
+
+10. Final Status
+
+PostgreSQL-backed CRUD fixes: implemented.
+
+Redis cache integration and invalidation: implemented; full mutation audit pending.
+
+Stampede protection: benchmark reported passing.
+
+API validation: passed on port 3000.
+
+Elasticsearch: running with an active Basic license.
+
+Empty-result caching: requires final code-level verification.
+
+Final acceptance: pending completion of the two cache audits and a final test run.
+
+============================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================================
+Day 18 — Build & Ship: Redis Locks and Rate Limiting
+
+1. Run the automated test suite
+
+# Command
+
+// npm test
+
+# Result
+
+21 tests passed
+0 tests failed
+
+What this verifies
+
+Lock acquisition and release.
+
+Handling an already-held lock.
+
+Redis errors and callback failures.
+
+Owner-token verification during lock release.
+
+Rate limiting and the 429 response.
+
+Retry-After calculation.
+
+Rate-limit key expiration and user isolation.
+
+Concurrent requests exceeding the configured limit.
+
+Some error logs appeared during the tests because certain tests intentionally simulate error conditions.
+
+2. Verify mutual exclusion using two processes
+
+# Command
+
+// node scripts/prove-with-lock.mjs
+
+# Result
+
+A ENTER critical section pid=17779
+B RESULT acquired=false pid=17780
+A RESULT acquired=true pid=17779
+PROOF PASSED: exactly one of two processes entered (proof:with-lock:0b495f0e-1c45-4e57-87c5-7c9d19a255f8)
+
+What this proves
+
+Two separate processes attempted to acquire the same lock. Process A acquired the lock and entered the critical section. Process B failed to acquire it while A held the lock.
+
+Therefore, both processes did not enter the protected section simultaneously.
+
+3. Verify the lock implementation
+
+File
+
+// src/withLock.mjs
+
+Implementation details
+
+Acquires a lock using Redis SET with NX and PX.
+
+NX allows acquisition only if the lock key does not exist.
+
+PX assigns the lock a TTL in milliseconds.
+
+A unique token identifies the process that owns the lock.
+
+A Lua script checks the token before deleting the lock.
+
+Why release uses Lua
+
+A normal GET followed by DEL is unsafe because these operations are separate.
+
+For example:
+
+Process A checks the lock and sees its own token.
+
+A's lock expires.
+
+Process B acquires the same lock.
+
+Process A executes DEL and accidentally deletes B's lock.
+
+Lua makes the ownership check and deletion atomic. The lock is deleted only if its stored token matches the releasing process's token.
+
+Important limitation: If a lock holder crashes, the lock remains until its TTL expires. Redis then allows another process to acquire it. If the protected operation runs longer than the TTL, overlapping execution is possible; the TTL must be appropriate for the operation.
+
+4. Verify the rate limiter's Redis Lua script
+
+File
+
+// src/rateLimitWorkItemCreate.mjs
+
+Configuration
+
+Maximum requests: 10
+Window: 60,000 milliseconds (60 seconds)
+Algorithm: Redis sorted set + Lua script
+
+How it works
+
+Removes request timestamps older than the 60-second window.
+
+Counts the remaining requests.
+
+If the count has reached 10, rejects the request.
+
+Calculates the retry delay from the oldest remaining request.
+
+Sets the key's expiry so the rate-limit data does not remain indefinitely.
+
+Otherwise, records the new request and refreshes the key's expiry.
+
+The Lua script performs the rate-limit decision and update atomically, preventing concurrent requests from independently passing the limit based on the same outdated count.
+
+5. Verify the rate limiter directly against Redis
+
+Command/result summary
+
+The Redis Lua script was executed against the local Redis instance.
+
+Result
+
+Lua result: [ 1, 0 ]
+Key type: zset
+Member count: 1
+TTL: 59998
+
+What this proves
+
+1 indicates that the request was allowed.
+
+0 indicates no retry delay was needed.
+
+The request was stored in a Redis sorted set (zset).
+
+One request member was recorded.
+
+The key had approximately 60 seconds of TTL remaining.
+
+This verifies that the Redis script records requests and applies expiration.
+
+6. Verify the live API rate limit
+
+The application server was restarted before the final live API verification.
+
+Test performed
+
+Sent 11 rapid POST requests to:
+
+POST /projects/3/work-items
+
+The request titles followed this pattern:
+
+DAY18_FINAL_VERIFY_1
+DAY18_FINAL_VERIFY_2
+...
+DAY18_FINAL_VERIFY_11
+
+Result
+
+Requests 1–10: HTTP 201 Created
+Request 11:    HTTP 429 Too Many Requests
+
+The rejected response body was:
+
+{
+  "success": false,
+  "errorCode": "RATE_LIMITED",
+  "message": "Too many work-item creation requests. Try again later."
+}
+
+What this proves
+
+The live API allowed the first 10 requests and rejected the 11th request within the configured window.
+
+The rejected request did not create another work item.
+
+Header verification note: The final live test captured the 429 response body, but it did not print the response headers. The implementation sets the Retry-After header, and the automated tests check the retry delay. Therefore, the live 429 behavior was verified, while the live header itself was not separately captured in this test.
+
+7. Verify rate-limit middleware integration
+
+File
+
+src/routes/workItemRoutes.mjs
+
+The work-item creation route applies middleware in this order:
+
+Rate limiter
+    ↓
+Request validation
+    ↓
+Work-item controller
+
+What this means
+
+A request that exceeds the rate limit is rejected before validation and controller execution. It cannot proceed to the work-item creation logic.
+
+The limiter is configured with the Redis client and identifies requests by authenticated user ID when available, falling back to the request IP.
+
+8. Verify code formatting and whitespace
+
+Command
+
+git diff --check
+
+Result
+
+No output
+
+What this proves
+
+Git found no whitespace errors in the current diff.
+
+9. Day 18 acceptance checklist
+
+Requirement
+
+Result
+
+Two-process lock test proves mutual exclusion
+
+Passed
+
+Lock release checks ownership atomically using Lua
+
+Implemented and tested
+
+Rate limiter rejects excessive requests with HTTP 429
+
+Passed in automated and live API tests
+
+Retry-After is set on rejected requests
+
+Implemented and covered by automated tests; live header not separately captured
+
+Rate-limit keys expire
+
+TTL behavior verified against Redis
+
+Lock holder crash behavior is understood
+
+Lock remains until TTL expiry
+
+Automated tests
+
+21 passed, 0 failed
+
+Git diff validation
+
+Passed
+
+10. Final outcome
+
+Day 18 implemented and tested Redis-based distributed locking and work-item creation rate limiting.
+
+The two-process test demonstrated mutual exclusion. Lock release uses an atomic Lua ownership check, while the rate limiter uses an atomic Redis Lua script, a 10-request limit per 60-second window, HTTP 429 responses, retry-delay calculation, and key expiration.
+
+The automated tests passed, the live API rejected the 11th rapid creation request, and git diff --check reported no issues.
+
+Remaining verification detail: Capture the actual Retry-After response header from a live 429 response if a separate live-header proof is required.

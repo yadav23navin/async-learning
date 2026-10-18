@@ -1,10 +1,20 @@
+import AppError from "../AppError.mjs";
+
 //import workItemService from "../services/workItemService.mjs";
 
 //now the controller  receives its dependency instead of finding it itself.
 const createWorkItemController = ({ workItemService }) => {
-    const create = (req, res) => {
-        const workItem = workItemService.create(
-            Number(req.params.projectId),
+    const parseId = (value, name) => {
+        const id = Number(value);
+        if (!Number.isSafeInteger(id) || id <= 0) {
+            throw new AppError(`${name} must be a positive integer`, 400, "BAD_REQUEST");
+        }
+        return id;
+    };
+
+    const create = async (req, res) => {
+        const workItem = await workItemService.create(
+            parseId(req.params.projectId, "projectId"),
             req.body.title
         );
 
@@ -25,7 +35,7 @@ const createWorkItemController = ({ workItemService }) => {
 
     // this will now support pagination and sorting, so it can pass page, limit, and sort parameters to the service
     const findAll = async (req, res) => {
-        if (req.query.cursor) {
+        if (Object.hasOwn(req.query, "cursor")) {
     const limit = Number(req.query.limit) || 50;
 
     const result = await workItemService.findAllCursor({
@@ -94,9 +104,9 @@ const findAllCursor = async (req, res) => {
     });
 };
 
-    const findById = (req, res) => {
-        const workItem = workItemService.findById(
-            Number(req.params.id)
+    const findById = async (req, res) => {
+        const workItem = await workItemService.findById(
+            parseId(req.params.id, "id")
         );
 
         res.json({
@@ -105,9 +115,9 @@ const findAllCursor = async (req, res) => {
         });
     };
 
-    const update = (req, res) => {
-        const workItem = workItemService.update(
-            Number(req.params.id),
+    const update = async (req, res) => {
+        const workItem = await workItemService.update(
+            parseId(req.params.id, "id"),
             req.body
         );
 
@@ -117,9 +127,9 @@ const findAllCursor = async (req, res) => {
         });
     };
 
-    const remove = (req, res) => {
-        const workItem = workItemService.remove(
-            Number(req.params.id)
+    const remove = async (req, res) => {
+        const workItem = await workItemService.remove(
+            parseId(req.params.id, "id")
         );
 
         res.json({

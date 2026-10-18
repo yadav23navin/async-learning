@@ -1,7 +1,7 @@
 import taskRepository from "../repositories/taskRepository.mjs";
 import escapeHtml from "../sanitize.mjs";
 
-const create = (title) => {
+const create = async (title) => {
     const sanitizedTitle = escapeHtml(title);
     const task = {
         id: Date.now(),

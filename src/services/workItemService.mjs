@@ -1,12 +1,30 @@
 import AppError from "../AppError.mjs";
 import escapeHtml from "../sanitize.mjs";
+import { buildInvalidationSet } from "../cacheInvalidation.mjs";
+import { invalidateCacheKeys } from "../cacheInvalidation.mjs";
 
 const createWorkItemService = ({
     workItemRepository,
-    projectRepository
+    projectRepository,
+    invalidateKeys = invalidateCacheKeys
 }) => {
-    const create = (projectId, title) => {
-        const project = projectRepository.findById(projectId);
+    const invalidate = async (projectId, operation) => {
+        try {
+            await invalidateKeys(buildInvalidationSet("workItem", { projectId, operation }));
+        } catch (cause) {
+            const error = new AppError(
+                "The work-item write succeeded, but cache invalidation failed. The record is committed; check it before retrying.",
+                503,
+                "CACHE_INVALIDATION_ERROR"
+            );
+            error.writeCommitted = true;
+            error.cause = cause;
+            throw error;
+        }
+    };
+
+    const create = async (projectId, title) => {
+        const project = await projectRepository.findById(projectId);
 
         if (!project) {
             throw new AppError(
@@ -17,12 +35,13 @@ const createWorkItemService = ({
         }
 
         const workItem = {
-            id: Date.now(),
-            projectId,
+            project_id: projectId,
             title: escapeHtml(title)
         };
 
-        return workItemRepository.create(workItem);
+        const created = await workItemRepository.create(workItem);
+        await invalidate(projectId, "create");
+        return created;
     };
 
     const findAll =async ({page,limit,sort}) => {
@@ -38,8 +57,8 @@ const createWorkItemService = ({
     });
 };
 
-    const findById = (id) => {
-        const workItem = workItemRepository.findById(id);
+    const findById = async(id) => {
+        const workItem = await workItemRepository.findById(id);
 
         if (!workItem) {
             throw new AppError(
@@ -52,14 +71,14 @@ const createWorkItemService = ({
         return workItem;
     };
 
-    const update = (id, data) => {
+    const update = async (id, data) => {
         const sanitizedData = {};
 
         if (data.title !== undefined) {
             sanitizedData.title = escapeHtml(data.title);
         }
 
-        const workItem = workItemRepository.update(id, sanitizedData);
+        const workItem = await workItemRepository.update(id, sanitizedData);
 
         if (!workItem) {
             throw new AppError(
@@ -69,11 +88,12 @@ const createWorkItemService = ({
             );
         }
 
+        await invalidate(workItem.project_id ?? workItem.projectId, "update-title");
         return workItem;
     };
 
-    const remove = (id) => {
-        const workItem = workItemRepository.remove(id);
+    const remove = async (id) => {
+        const workItem = await workItemRepository.remove(id);
 
         if (!workItem) {
             throw new AppError(
@@ -83,6 +103,7 @@ const createWorkItemService = ({
             );
         }
 
+        await invalidate(workItem.project_id ?? workItem.projectId, "delete");
         return workItem;
     };
 

@@ -1,6 +1,6 @@
 const createProjectController = ({ projectService }) => {
-    const create = (req, res) => {
-        const project = projectService.create(req.body.name);
+    const create = async (req, res) => {
+        const project = await projectService.create(req.body.name);
 
         res.status(201).json({
             success: true,
@@ -8,8 +8,8 @@ const createProjectController = ({ projectService }) => {
         });
     };
 
-    const findAll = (req, res) => {
-        const projects = projectService.findAll();
+    const findAll = async (req, res) => {
+        const projects = await projectService.findAll();
 
         res.json({
             success: true,
@@ -17,8 +17,8 @@ const createProjectController = ({ projectService }) => {
         });
     };
 
-    const findById = (req, res) => {
-        const project = projectService.findById(
+    const findById = async (req, res) => {
+        const project = await projectService.findById(
             Number(req.params.id)
         );
 
@@ -28,8 +28,8 @@ const createProjectController = ({ projectService }) => {
         });
     };
 
-    const update = (req, res) => {
-        const project = projectService.update(
+    const update = async (req, res) => {
+        const project = await projectService.update(
             Number(req.params.id),
             req.body
         );
@@ -40,8 +40,8 @@ const createProjectController = ({ projectService }) => {
         });
     };
 
-    const remove = (req, res) => {
-        const project = projectService.remove(
+    const remove = async (req, res) => {
+        const project = await projectService.remove(
             Number(req.params.id)
         );
 

@@ -29,6 +29,10 @@ import createSearchRoutes from "./routes/searchRoutes.mjs";
 import createExportRepository from "./repositories/exportRepository.mjs";
 import createExportService from "./services/exportService.mjs";
 import createExportController from "./controllers/exportController.mjs";
+import redisClient from "./redisClient.mjs";
+import cacheWorkItemsResponse from "./cacheWorkItemsResponse.mjs";
+import createReferenceRoutes from "./routes/referenceRoutes.mjs";
+import { getBackendCallMetrics, resetBackendCallMetrics } from "./backendCallMetrics.mjs";
 
 
 const projectRepository = createProjectRepository();                                   // this is responsible for check project repository
@@ -57,7 +61,8 @@ const workItemController = createWorkItemController({
 });
 
 const workItemRoutes = createWorkItemRoutes({
-    workItemController
+    workItemController,
+    redis: redisClient
 });
 
 const dashboardRepository = createDashboardRepository();
@@ -78,11 +83,19 @@ const searchRepository = createSearchRepository();
 const searchService = createSearchService({ searchRepository });
 const searchController = createSearchController({ searchService });
 const searchRoutes = createSearchRoutes({ searchController });
+const referenceRoutes = createReferenceRoutes({ searchRepository });
 const exportRepository = createExportRepository();
 const exportService = createExportService({ exportRepository });
 const exportController = createExportController({ exportService });
 
 const app = express();
+if (process.env.NODE_ENV !== "production") {
+    app.get("/__bench/backend-calls", (req, res) => res.json(getBackendCallMetrics()));
+    app.post("/__bench/backend-calls/reset", (req, res) => {
+        resetBackendCallMetrics();
+        res.status(204).end();
+    });
+}
 //const tasks = [];
 
 app.use(logger);
@@ -201,15 +214,30 @@ app.get("/internal-error", (req, res) => {
         task
     });
 });  */}
+app.use(cacheWorkItemsResponse);
 app.use("/tasks", taskRoutes);                                     // this is responsible for check task routes
 app.use("/projects", projectRoutes);                                 // this is responsible for check project routes
 app.use("/dashboard", dashboardRoutes);                            // this is responsible for check dashboard routes
 app.use("/", workItemRoutes);                                     // this is responsible for check work item routes
-app.use("/search", searchRoutes);                                 // this is responsible for check search routes
+app.use("/search", searchRoutes);
+app.use("/reference", referenceRoutes);                                 // this is responsible for check search routes
 app.get("/export", exportController
     .exportWorkItems);app.use(errorHandler);                                            // this is responsible for check error handler
 
 
-app.listen(3000, () => {
-    console.log("Server running on port 3000");
-});
+const startServer = async () => {
+    try {
+        await redisClient.connect();
+        console.log("Redis connected");
+
+        const port = Number(process.env.PORT || 3000);
+        app.listen(port, () => {
+            console.log(`Server running on port ${port}`);
+        });
+    } catch (err) {
+        console.error("Failed to start server:", err.message);
+        process.exit(1);
+    }
+};
+
+startServer();

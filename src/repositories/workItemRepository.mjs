@@ -60,6 +60,7 @@ export default createWorkItemRepository; */}
 import pg from "pg";
 import {Buffer} from "node:buffer";
 import AppError from "../AppError.mjs";
+import { recordWorkItemListFetch } from "../backendCallMetrics.mjs";
 
 const { Client } = pg;
 
@@ -81,14 +82,14 @@ const decodeCursor =(cursor) => {
 };
 
 
-const createWorkItemRepository = () => {
+const createWorkItemRepository = ({ ClientClass = Client } = {}) => {
     const createClient = () =>
-        new Client({
-            host: "localhost",
-            port: 5432,
-            database: "minitrack",
-            user: "minitrack",
-            password: "minitrack"
+        new ClientClass({
+            host: process.env.PGHOST || "localhost",
+            port: Number(process.env.PGPORT || 5432),
+            database: process.env.PGDATABASE || "minitrack",
+            user: process.env.PGUSER || "minitrack",
+            password: process.env.PGPASSWORD || "minitrack"
         });
 
     {/*const findAll = async () => {
@@ -128,6 +129,7 @@ const createWorkItemRepository = () => {
     try {
         const offset = (page - 1) * limit;
 
+        recordWorkItemListFetch();
         const result = await client.query(
             `
             SELECT
@@ -232,9 +234,84 @@ const findAllCursor = async ({ cursor, limit }) => {
         await client.end();
     }
 };
+const create = async (workItem) => {
+    const client = createClient();
+    await client.connect();
+
+    try {
+        const result = await client.query(
+            `INSERT INTO work_items (project_id, title)
+             VALUES ($1, $2)
+             RETURNING id, project_id, title, description, status, priority, created_at, updated_at`,
+            [workItem.project_id ?? workItem.projectId, workItem.title]
+        );
+        return result.rows[0] ?? null;
+    } finally {
+        await client.end();
+    }
+};
+
+const findById = async (id) => {
+    const client = createClient();
+    await client.connect();
+
+    try {
+        const result = await client.query(
+            `SELECT id, project_id, title, status, priority, created_at
+             FROM work_items
+             WHERE id = $1`,
+            [id]
+        );
+
+        return result.rows[0] ?? null;
+    } finally {
+        await client.end();
+    }
+};
+
+const update = async (id, data) => {
+    const client = createClient();
+    await client.connect();
+
+    try {
+        const result = await client.query(
+            `UPDATE work_items
+             SET title = $1, updated_at = NOW()
+             WHERE id = $2
+             RETURNING id, project_id, title, status, priority, created_at`,
+            [data.title, id]
+        );
+
+        return result.rows[0] ?? null;
+    } finally {
+        await client.end();
+    }
+};
+
+const remove = async (id) => {
+    const client = createClient();
+    await client.connect();
+
+    try {
+        const result = await client.query(
+            `DELETE FROM work_items
+             WHERE id = $1
+             RETURNING id, project_id, title, status, priority, created_at`,
+            [id]
+        );
+
+        return result.rows[0] ?? null;
+    } finally {
+        await client.end();
+    }
+};
 return {
+    create,
     findAll,
-    findAllCursor
+    findAllCursor,
+    findById,
+    update,
+    remove
 };
 };
 

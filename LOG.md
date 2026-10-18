@@ -3117,4 +3117,42 @@ Version mismatch
         ↓
 409 Conflict
         ↓
-No silent overwrite 
+No silent overwrite
+# Day 18 — Redis locks and work-item create rate limiting
+
+## Implementation
+
+- Added `src/withLock.mjs`: `SET key token NX PX ttl` obtains a lock, where `ttl` is milliseconds. A held lock returns `{ acquired: false }`; Redis acquisition errors reject. The callback runs only after acquisition, and `finally` runs a Lua compare-token-and-delete script. If the callback lasts beyond the TTL, another owner can acquire the key and work may overlap; callers must keep critical sections within the TTL or use a separate lease-renewal design.
+- Added a Redis sorted-set sliding-window limiter to `POST /projects/:projectId/work-items` only. One Lua script removes entries at least 60 seconds old, checks the count, and inserts an allowed request atomically. Rejections return the established JSON error shape with status 429 and `Retry-After` based on the oldest active entry. Redis keys expire at the last relevant window boundary.
+- This project currently has no authentication middleware. The limiter uses `req.user.id` if trusted upstream authentication provides it; otherwise it scopes by Express `req.ip`. Client-supplied user identifiers are ignored.
+- Added `scripts/prove-with-lock.mjs`, which starts two separate Node processes concurrently using the same unique lock key. Each has a 5-second TTL and holds the lock for 1.2 seconds. The script does not remove the key independently; only the token-owning process may release it.
+
+## Verification (2026-10-18)
+
+Commands and observed results:
+
+```text
+npm test
+# 21 tests passed, 0 failed
+
+node scripts/prove-with-lock.mjs
+B ENTER critical section pid=15935
+A RESULT acquired=false pid=15934
+B RESULT acquired=true pid=15935
+PROOF PASSED: exactly one of two processes entered (proof:with-lock:<unique-id>)
+
+node --check src/withLock.mjs
+node --check src/rateLimitWorkItemCreate.mjs
+node --check src/routes/workItemRoutes.mjs
+node --check src/server.mjs
+node --check scripts/prove-with-lock.mjs
+node --check test/day18.test.mjs
+# all syntax checks passed
+
+git diff --check
+# passed
+```
+
+`npm test` includes the existing Day 17 tests plus eight Day 18 tests covering lock acquire/refusal/Redis error/callback error/release ownership, under/over-limit requests, expiry, independent users, concurrency, and `Retry-After`. The proof ran successfully against local Redis after allowing localhost access outside the restricted sandbox; the sandbox itself blocks local sockets. Rate limiting remains IP-scoped until trusted authentication is added.
+
+Run later with `npm test` and `node scripts/prove-with-lock.mjs`; ensure Redis is available at `REDIS_URL` or `redis://localhost:6379`.
