@@ -6,6 +6,7 @@ import { invalidateCacheKeys } from "../cacheInvalidation.mjs";
 const createWorkItemService = ({
     workItemRepository,
     projectRepository,
+    publishEvent = async () => {},
     invalidateKeys = invalidateCacheKeys
 }) => {
     const invalidate = async (projectId, operation) => {
@@ -41,6 +42,13 @@ const createWorkItemService = ({
 
         const created = await workItemRepository.create(workItem);
         await invalidate(projectId, "create");
+
+        await publishEvent("work_item.created", {
+            work_item_id: created.id,
+            project_id: created.project_id,
+            title: created.title
+        });
+
         return created;
     };
 
@@ -78,6 +86,10 @@ const createWorkItemService = ({
             sanitizedData.title = escapeHtml(data.title);
         }
 
+        if (data.assignee_id !== undefined) {
+            sanitizedData.assignee_id = data.assignee_id;
+        }
+
         const workItem = await workItemRepository.update(id, sanitizedData);
 
         if (!workItem) {
@@ -88,7 +100,20 @@ const createWorkItemService = ({
             );
         }
 
-        await invalidate(workItem.project_id ?? workItem.projectId, "update-title");
+        await invalidate(
+            workItem.project_id ?? workItem.projectId,
+            data.assignee_id !== undefined ? "assign" : "update-title"
+        );
+
+        if (data.assignee_id !== undefined) {
+            await publishEvent("work_item.assigned", {
+                work_item_id: workItem.id,
+                project_id: workItem.project_id,
+                title: workItem.title,
+                assignee_id: workItem.assignee_id
+            });
+        }
+
         return workItem;
     };
 

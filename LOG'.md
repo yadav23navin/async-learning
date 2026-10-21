@@ -1835,3 +1835,895 @@ The two-process test demonstrated mutual exclusion. Lock release uses an atomic 
 The automated tests passed, the live API rejected the 11th rapid creation request, and git diff --check reported no issues.
 
 Remaining verification detail: Capture the actual Retry-After response header from a live 429 response if a separate live-header proof is required.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 19 — RabbitMQ Event-Driven Email Notifications
+
+Objective
+
+Implement asynchronous email notifications in MiniTrack using RabbitMQ. The API publishes work-item events, a separate worker consumes them, and MailHog captures the test emails. Email delivery should not block the API request.
+
+1. Install RabbitMQ and email dependencies
+
+Installed the Node.js packages used for RabbitMQ messaging and email delivery.
+
+npm install amqplib nodemailer
+
+Result: Dependencies installed for RabbitMQ communication and SMTP email sending.
+
+Checked Docker availability:
+
+docker --version
+
+Output:
+
+Docker version 29.1.3
+
+2. Configure RabbitMQ and MailHog
+
+Created compose.yaml to run RabbitMQ with its management UI and MailHog for local email testing.
+
+docker compose up -d
+
+Result: Both containers started successfully.
+
+minitrack-rabbitmq
+
+minitrack-mailhog
+
+Checked container status:
+
+docker compose ps
+
+Output:
+
+NAME                 IMAGE                    SERVICE    STATUS
+minitrack-mailhog    mailhog/mailhog:v1.0.1   mailhog    Up
+minitrack-rabbitmq   rabbitmq:3-management    rabbitmq   Up (healthy)
+
+The services expose these local ports:
+
+RabbitMQ: 5672
+
+RabbitMQ Management UI: 15672
+
+MailHog SMTP: 1025
+
+MailHog Web UI: 8025
+
+Useful URLs:
+
+RabbitMQ UI: http://localhost:15672
+
+MailHog inbox: http://localhost:8025
+
+3. Implement the RabbitMQ publisher
+
+Created src/messaging/rabbitmq.mjs.
+
+The publisher declares durable exchanges and queues, publishes persistent event messages, and waits for publisher confirmations.
+
+Topology:
+
+Express API
+    |
+    v
+RabbitMQ Publisher
+    |
+    v
+work_items.events (topic exchange)
+    |
+    +-- work_item.created
+    |       |
+    |       v
+    |   work_item_created.email
+    |
+    +-- work_item.assigned
+            |
+            v
+        work_item_assigned.email
+
+The implementation also configures the dead-letter exchange work_items.dead and durable failed-message queues.
+
+Each event contains:
+
+eventId
+
+eventType
+
+occurredAt
+
+data
+
+The event ID is also used as the AMQP message ID.
+
+4. Publish events from the work-item service
+
+Updated src/services/workItemService.mjs to publish events after the work-item database operation and cache invalidation succeed.
+
+Events implemented:
+
+work_item.created
+
+work_item.assigned
+
+Creation event payload:
+
+{
+  work_item_id: created.id,
+  project_id: created.project_id,
+  title: created.title
+}
+
+Assignment event payload:
+
+{
+  work_item_id: workItem.id,
+  project_id: workItem.project_id,
+  title: workItem.title,
+  assignee_id: workItem.assignee_id
+}
+
+Updated the work-item update path to accept assignee_id, and updated the repository to build a parameterized SQL update based on the supplied fields.
+
+Updated src/server.mjs to connect the publisher during startup and inject it into the work-item service.
+
+5. Update request validation
+
+Updated src/workItemSchemas.mjs so that work-item updates accept an optional title or a positive integer assignee_id.
+
+Both schemas use strict object validation, and an update must provide at least one supported field.
+
+6. Implement the email worker
+
+Created src/workers/emailWorker.mjs.
+
+The worker:
+
+Connects to RabbitMQ.
+
+Declares the same exchanges, queues, bindings, and dead-letter configuration as the publisher.
+
+Consumes both event queues.
+
+Uses prefetch(1) to limit outstanding unacknowledged messages.
+
+Sends email using Nodemailer and MailHog SMTP.
+
+Acknowledges messages only after sendMail succeeds.
+
+Rejects failed messages without requeue so RabbitMQ can route them to the dead-letter queue.
+
+Added the npm script:
+
+"worker:email": "node src/workers/emailWorker.mjs"
+
+Verified the available scripts:
+
+npm run
+
+Relevant output:
+
+start
+  node src/server.mjs
+test
+  node --test test/*.test.mjs
+dev
+  node --watch src/server.mjs
+worker:email
+  node src/workers/emailWorker.mjs
+
+7. Validate JavaScript syntax
+
+Ran:
+
+node --check src/workers/emailWorker.mjs
+node --check src/messaging/rabbitmq.mjs
+
+Result: Both syntax checks passed without errors.
+
+8. Start the email worker
+
+Ran:
+
+npm run worker:email
+
+Output:
+
+> worker:email
+> node src/workers/emailWorker.mjs
+
+Email worker connected. Waiting for messages...
+
+Conclusion: The worker connected to RabbitMQ and started listening for messages.
+
+9. Start the API
+
+In a separate terminal, ran:
+
+npm run dev
+
+Output:
+
+> dev
+> node --watch src/server.mjs
+
+Redis connected
+RabbitMQ publisher connected
+Server running on port 3000
+
+Conclusion: Redis and the RabbitMQ publisher connected successfully, and the API started on port 3000.
+
+10. Find a valid project ID
+
+Queried PostgreSQL to find existing projects:
+
+SELECT id FROM projects ORDER BY id LIMIT 5;
+
+Output:
+
+[
+  { id: '1' },
+  { id: '2' },
+  { id: '3' }
+]
+
+Used project ID 1 for the creation test.
+
+11. Test the work-item creation event
+
+Ran:
+
+curl -i -X POST http://localhost:3000/projects/1/work-items \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Day 19 RabbitMQ email test"}'
+
+Output:
+
+HTTP/1.1 201 Created
+Content-Type: application/json; charset=utf-8
+
+Response body:
+
+{
+  "success": true,
+  "workItem": {
+    "id": "500339",
+    "project_id": "1",
+    "title": "Day 19 RabbitMQ email test",
+    "description": null,
+    "status": "todo",
+    "priority": "medium",
+    "created_at": "2026-10-20T18:30:59.187Z",
+    "updated_at": "2026-10-20T18:30:59.187Z"
+  }
+}
+
+The worker logged:
+
+Email worker connected. Waiting for messages...
+Email sent for work_item.created; event ID: 3722b914-9364-4a24-b01c-bd0c9cfb06ac
+
+Conclusion: The API created the work item, RabbitMQ delivered the creation event, and the worker successfully processed it.
+
+12. Find valid users for assignment
+
+Queried the users table to inspect its columns.
+
+SELECT column_name
+FROM information_schema.columns
+WHERE table_name = 'users'
+ORDER BY ordinal_position;
+
+Output:
+
+id
+name
+email
+created_at
+
+Queried existing users:
+
+SELECT id, name, email FROM users ORDER BY id LIMIT 5;
+
+Output:
+
+[
+  { id: '1', name: 'Aarav', email: 'aarav1@minitrack.local' },
+  { id: '2', name: 'Vivaan', email: 'vivaan2@minitrack.local' },
+  { id: '3', name: 'Aditya', email: 'aditya3@minitrack.local' },
+  { id: '4', name: 'Arjun', email: 'arjun4@minitrack.local' },
+  { id: '5', name: 'Kabir', email: 'kabir5@minitrack.local' }
+]
+
+Used user ID 1 for the assignment test.
+
+13. Test the work-item assignment event
+
+Ran:
+
+curl -i -X PATCH http://localhost:3000/work-items/500339 \
+  -H 'Content-Type: application/json' \
+  -d '{"assignee_id":1}'
+
+The worker logged:
+
+Email sent for work_item.assigned; event ID: 4f7db03d-c6cf-4c56-bb84-6e98262accac
+
+Conclusion: The assignment event reached the worker and the email send operation succeeded.
+
+The worker uses the configured test recipient (developer@example.test by default). The assigned user's email is not automatically looked up by the current worker implementation.
+
+14. Run automated tests
+
+Ran the existing test suite:
+
+npm test
+
+Relevant output:
+
+✔ invalidation map targets affected key families
+✔ a concurrent cold cache is filled once; distinct keys fetch independently
+✔ expired locks can be recovered and an owner never releases another owner's lock
+✔ failed backend reads are not cached and do not produce unhandled retries
+✔ Redis read or lock failures fall back to exactly one backend fetch
+✔ HTTP cache warms, hits, and invalidates after create, update, and delete
+✔ invalid project and failed or missing writes do not invalidate cache
+✔ failed database create does not invalidate cached data
+✔ a committed write is explicit when cache invalidation fails
+✔ wildcard invalidation scans and deletes all matching keys only
+✔ wildcard invalidation follows multiple SCAN cursors before deleting
+✔ lock acquires, invokes once, then releases
+✔ held lock refuses a second callback
+✔ Redis acquisition errors reject without running callback
+✔ callback failure still releases lock
+✔ old owner cannot delete a replaced lock; release script checks token atomically
+✔ allows first ten, rejects the eleventh with sensible Retry-After, and leaves reads alone
+✔ allows a request once an earlier request expires and isolates users
+✔ concurrent creates never exceed ten
+✔ PostgreSQL project repository awaits DB lookup and returns the database row
+✔ PostgreSQL work-item create, lookup, update, and delete return rows
+
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+
+Conclusion: All 21 automated tests passed. Some AppError and simulated database/Redis error messages were printed by negative-path tests; they did not indicate test failures.
+
+15. Day 19 concepts learned
+
+Publisher confirmation is not email delivery
+
+The API waits for RabbitMQ to confirm publication. It does not wait for the email worker to finish sending the email.
+
+Manual acknowledgement
+
+The worker acknowledges a message only after sendMail succeeds. This allows RabbitMQ to redeliver an unacknowledged message if the consumer disconnects before acknowledgement.
+
+Dead-letter queues
+
+Failed messages are rejected without requeue and routed to the configured dead-letter queues. This avoids an infinite retry loop for permanently failing messages.
+
+API/database consistency
+
+The database write and RabbitMQ publish are not one atomic transaction. If the database write succeeds but publication fails, the event may be lost. A transactional outbox is a stronger production approach.
+
+Duplicate delivery
+
+A message may be processed more than once under certain failure conditions. Production consumers should consider idempotency and deduplication.
+
+Final Status
+
+RabbitMQ and MailHog started successfully.
+
+RabbitMQ publisher connected to the API.
+
+Email worker connected and consumed messages.
+
+work_item.created flow tested successfully.
+
+work_item.assigned flow tested successfully.
+
+Manual acknowledgements and prefetch configured.
+
+Durable queues and dead-letter routing configured.
+
+JavaScript syntax checks passed.
+
+All 21 automated tests passed.
+
+README updated with architecture, setup, testing, and reliability notes.
+
+# Day 19 — Final Reliability and Performance Verification
+
+16. Measure create-endpoint latency with notifications enabled
+
+Ran an HTTP benchmark against the work-item creation endpoint with normal notification publishing enabled.
+
+cd ~/Documents/async-learning && node --input-type=module <<'NODE'
+const times = [];
+const total = 8;
+
+for (let i = 0; i < total; i++) {
+  const start = performance.now();
+  const response = await fetch("http://localhost:3000/projects/1/work-items", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: `Day19 p95 test ${Date.now()}-${i}` })
+  });
+
+  const elapsed = performance.now() - start;
+  const body = await response.text();
+
+  if (!response.ok) {
+    console.error(`Request ${i + 1} failed: HTTP ${response.status}`, body);
+    process.exit(1);
+  }
+
+  times.push(elapsed);
+}
+
+times.sort((a, b) => a - b);
+console.log(`Successful requests: ${times.length}/${total}`);
+console.log(`Min: ${times[0].toFixed(2)} ms`);
+console.log(`Median: ${times[Math.floor(times.length / 2)].toFixed(2)} ms`);
+console.log(`p95 (nearest-rank): ${times[Math.ceil(0.95 * times.length) - 1].toFixed(2)} ms`);
+console.log(`Max: ${times[times.length - 1].toFixed(2)} ms`);
+NODE
+
+Output:
+
+Successful requests: 8/8
+Min: 29.55 ms
+Median: 31.30 ms
+p95 (nearest-rank): 75.49 ms
+Max: 75.49 ms
+
+Note: The initial 30-request benchmark hit HTTP 429 because the endpoint allows 10 creations per minute per client IP. The successful benchmark was reduced to eight requests.
+
+17. Measure baseline latency with event publishing disabled
+
+Added a temporary benchmark switch in src/server.mjs:
+
+const rabbitPublisher = createRabbitPublisher();
+const notificationsEnabled =
+    process.env.DISABLE_EVENT_PUBLISHING !== "1";
+
+const workItemService = createWorkItemService({
+    workItemRepository,
+    projectRepository,
+    publishEvent: notificationsEnabled
+        ? rabbitPublisher.publish
+        : async () => {}
+});
+
+Publisher startup was made conditional on the same flag.
+
+Started the API without event publishing:
+
+cd ~/Documents/async-learning && DISABLE_EVENT_PUBLISHING=1 npm start
+
+Ran the same eight-request benchmark against the creation endpoint.
+
+Output:
+
+Successful requests: 8/8
+Min: 26.49 ms
+Median: 29.73 ms
+p95 (nearest-rank): 107.88 ms
+Max: 107.88 ms
+
+Comparison
+
+Metric
+
+Notifications enabled
+
+Publishing disabled
+
+Successful requests
+
+8
+
+8
+
+Median
+
+31.30 ms
+
+29.73 ms
+
+p95
+
+75.49 ms
+
+107.88 ms
+
+Maximum
+
+75.49 ms
+
+107.88 ms
+
+Conclusion: The measurements do not establish that p95 is unchanged. The samples are too small and noisy to support that claim. A larger controlled benchmark with repeated runs is needed for a reliable comparison.
+
+The implementation awaits RabbitMQ publisher confirmation in the work-item service. Consequently, the API response includes publication-confirmation latency, although it does not wait for the email worker to send the email.
+
+18. Test worker crash and redelivery
+
+Configured an optional processing delay in src/workers/emailWorker.mjs using WORKER_TEST_DELAY_MS. When set, the worker waits before parsing and processing a received message.
+
+Started the worker in test mode:
+
+cd ~/Documents/async-learning && WORKER_TEST_DELAY_MS=15000 npm run worker:email
+
+Triggered an assignment update:
+
+curl -i -X PATCH http://localhost:3000/work-items/500339 \
+  -H 'Content-Type: application/json' \
+  -d '{"assignee_id":2}'
+
+The API returned:
+
+HTTP/1.1 200 OK
+
+After restarting the worker normally, the following log appeared:
+
+Email sent for work_item.assigned; event ID: a968ea08-bde5-4bbb-b73f-43be65696160
+
+Conclusion: An assignment event was processed after the worker restart. However, the test did not conclusively capture the same message being unacknowledged at the instant of the crash and then redelivered. The crash/redelivery acceptance criterion remains to be verified definitively.
+
+19. Test RabbitMQ persistence across broker restart
+
+Stopped the email worker so it could not consume the test message.
+
+Published a persistent test event directly to the durable work_items.events exchange with routing key work_item.created. The event ID was:
+
+broker-restart-test-1792523562306
+
+Before restarting RabbitMQ, checked queue state:
+
+docker exec minitrack-rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+
+Relevant output:
+
+name                         messages_ready  messages_unacknowledged
+work_item_created.email      1               0
+
+Restarted the broker:
+
+docker restart minitrack-rabbitmq
+
+After the restart, checked the queue again.
+
+Relevant output:
+
+name                         messages_ready  messages_unacknowledged
+work_item_created.email      1               0
+
+Started the email worker normally:
+
+cd ~/Documents/async-learning && npm run worker:email
+
+Output:
+
+Email worker connected. Waiting for messages...
+Email sent for work_item.created; event ID: broker-restart-test-1792523562306
+
+Conclusion: Persistence test passed. The queued message survived the RabbitMQ restart and was subsequently processed by the email worker with the same event ID.
+
+20. Final test suite
+
+Ran:
+
+npm test
+
+Final test summary:
+
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+
+Conclusion: All 21 automated tests passed.
+
+21. Final status
+
+RabbitMQ and MailHog configured and started.
+
+API publisher and email worker implemented.
+
+work_item.created notification tested successfully.
+
+work_item.assigned notification tested successfully.
+
+Durable queues, persistent messages, manual acknowledgements, and prefetch(1) configured.
+
+Dead-letter exchange and failed-message queues configured.
+
+All 21 automated tests passed.
+
+RabbitMQ restart persistence test passed with the same event ID confirmed after restart.
+
+Worker crash/redelivery test attempted, but same-message redelivery still needs definitive verification.
+
+API p95 measured with publishing enabled and disabled; results are inconclusive because the sample size was small.
+
+Topology is documented, but its existence before coding has not been independently verified.
+
+The API was restarted in normal mode with notification publishing enabled after the baseline test.
+
+Overall outcome: The asynchronous email-notification feature is implemented and locally tested. RabbitMQ persistence is verified. Worker redelivery and the requirement that create-endpoint p95 remain unchanged still need stronger evidence before every acceptance criterion can be marked complete.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 20 — Build / Ship: RabbitMQ Reliability Layer
+
+Goal
+
+Add retries with exponential backoff, a dead-letter queue (DLQ) after three attempts, and Redis-based idempotency to prevent duplicate emails when the same event is delivered more than once.
+
+1. Environment verification
+
+Redis, RabbitMQ, and MailHog were already installed.
+
+RabbitMQ container: minitrack-rabbitmq
+
+Redis container: redis-local
+
+MailHog container: minitrack-mailhog
+
+RabbitMQ management UI: http://localhost:15672
+
+MailHog UI: http://localhost:8025
+
+Redis connection: redis://localhost:6379
+
+Started Redis and verified connectivity:
+
+docker start redis-local
+docker exec redis-local redis-cli ping
+
+Expected output:
+
+redis-local
+PONG
+
+Verified Node.js Redis connectivity:
+
+node --input-type=module -e 'import { createClient } from "redis"; const r = createClient({ url: process.env.REDIS_URL || "redis://localhost:6379" }); r.on("error", e => console.error("Redis error:", e.message)); await r.connect(); console.log("Redis PING:", await r.ping()); await r.quit();'
+
+Output:
+
+Redis PING: PONG
+
+2. Backed up the Day 19 worker
+
+cp src/workers/emailWorker.mjs src/workers/emailWorker.day19.bak.mjs
+
+Output:
+
+Day 19 worker backed up
+
+3. Implemented retry queues
+
+Updated src/messaging/rabbitmq.mjs to configure durable retry queues for both email event types.
+
+Retry queue
+
+Message TTL
+
+Purpose
+
+work_item_created.email.retry.1
+
+2,000 ms
+
+First retry delay
+
+work_item_created.email.retry.2
+
+4,000 ms
+
+Second retry delay
+
+work_item_assigned.email.retry.1
+
+2,000 ms
+
+First retry delay
+
+work_item_assigned.email.retry.2
+
+4,000 ms
+
+Second retry delay
+
+After a retry queue's TTL expires, its dead-letter configuration routes the message back to the corresponding main queue.
+
+The existing .failed queues remain the final destination for messages that fail three processing attempts.
+
+4. Updated the email worker
+
+Updated src/workers/emailWorker.mjs to implement:
+
+A retry-count header named x-retry-count.
+
+Three total processing attempts.
+
+Exponential backoff of 2 seconds, followed by 4 seconds.
+
+Persistent messages in the retry queues.
+
+Manual acknowledgement after successful processing.
+
+Dead-lettering after the third failed attempt.
+
+Redis-based duplicate suppression using event IDs.
+
+A Redis processing lock to reduce concurrent processing of the same event.
+
+A test-only permanent failure switch: WORKER_ALWAYS_FAIL=1.
+
+Redis keys used:
+
+email:sent:<eventId> — records successful email processing for seven days.
+
+email:processing:<eventId> — temporary processing lock with a 60-second expiry.
+
+The worker checks the sent marker before sending. If the event has already been processed, it acknowledges the duplicate without sending another email.
+
+5. Syntax and regression tests
+
+Ran:
+
+node --check src/messaging/rabbitmq.mjs
+node --check src/workers/emailWorker.mjs
+npm test
+
+Results:
+
+tests 21
+pass 21
+fail 0
+cancelled 0
+skipped 0
+todo 0
+
+Both syntax checks passed, and all 21 existing tests passed.
+
+6. Permanent failure test
+
+Started the worker in failure-injection mode:
+
+WORKER_ALWAYS_FAIL=1 npm run worker:email
+
+Published one persistent test event with the initial retry count set to zero.
+
+Test event ID:
+
+day20-failure-54144868-a3ee-4e51-b104-275791a239c1
+
+The message was published to the work_items.events exchange using the work_item.created routing key.
+
+Worker evidence
+
+Processing work_item.created; event ID: day20-failure-54144868-a3ee-4e51-b104-275791a239c1; attempt 1/3
+Attempt 1/3 failed for day20-failure-54144868-a3ee-4e51-b104-275791a239c1: Forced failure for Day 20 retry test
+Retry scheduled; event ID: day20-failure-54144868-a3ee-4e51-b104-275791a239c1; next attempt 2; delay 2000ms
+Processing work_item.created; event ID: day20-failure-54144868-a3ee-4e51-b104-275791a239c1; attempt 2/3
+Attempt 2/3 failed for day20-failure-54144868-a3ee-4e51-b104-275791a239c1: Forced failure for Day 20 retry test
+Retry scheduled; event ID: day20-failure-54144868-a3ee-4e51-b104-275791a239c1; next attempt 3; delay 4000ms
+Processing work_item.created; event ID: day20-failure-54144868-a3ee-4e51-b104-275791a239c1; attempt 3/3
+Attempt 3/3 failed for day20-failure-54144868-a3ee-4e51-b104-275791a239c1: Forced failure for Day 20 retry test
+Sending to DLQ after 3 attempts
+
+Result: PASSED
+
+The same event ID appeared in all three attempts. The logged retry delays increased from 2,000 ms to 4,000 ms, and the third failure was sent to the DLQ.
+
+7. Verified the DLQ
+
+Ran:
+
+docker exec minitrack-rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+
+Relevant result:
+
+work_item_created.email.failed  1  0
+
+The DLQ contained exactly one ready message and zero unacknowledged messages.
+
+8. Duplicate event test
+
+Restarted the worker in normal mode:
+
+npm run worker:email
+
+Published the same event twice with the same event ID:
+
+day20-duplicate-test-001
+
+The test event title was:
+
+Day 20 duplicate suppression test
+
+Both copies were published successfully to RabbitMQ with the same event ID.
+
+The worker logs confirmed that the first copy was processed and the duplicate was suppressed. MailHog was checked at http://localhost:8025; exactly one matching email was present.
+
+Result: PASSED
+
+Two copies of the same event produced only one email.
+
+9. Final queue verification
+
+Ran:
+
+docker exec minitrack-rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+
+Final output:
+
+name                                  messages_ready  messages_unacknowledged
+work_item_created.email.retry.2      0               0
+work_item_assigned.email              0               0
+work_item_assigned.email.retry.2      0               0
+work_item_assigned.email.retry.1      0               0
+work_item_created.email.failed        1               0
+work_item_created.email               0               0
+work_item_created.email.retry.1       0               0
+work_item_assigned.email.failed       0               0
+
+The one remaining DLQ message is the deliberately failing test event. All main and retry queues are empty, and no messages are unacknowledged.
+
+10. Concepts learned
+
+Retry count header: records the number of retries performed for an event.
+
+Exponential backoff: delays retries progressively to avoid repeatedly hitting a failing dependency.
+
+Delay queue: holds a message until its TTL expires, then routes it back to the main queue.
+
+Dead-letter queue: stores messages that cannot be processed after the configured number of attempts.
+
+Manual acknowledgement: tells RabbitMQ that a message has been handled.
+
+Idempotency: ensures repeated processing of the same event does not repeat an already completed side effect.
+
+Redis sent marker: records successful email processing and suppresses later duplicates.
+
+Processing lock: helps prevent concurrent handling of the same event.
+
+Failure injection: deliberately simulates a permanent error to prove retry and DLQ behavior.
+
+Final status
+
+Retry-count header implemented.
+
+Exponential backoff implemented: 2 seconds, then 4 seconds.
+
+Maximum of three processing attempts enforced.
+
+Permanent failure test reached the DLQ after exactly three attempts.
+
+DLQ message count verified.
+
+Redis idempotency implemented.
+
+Duplicate event test produced only one email in MailHog.
+
+Main and retry queues verified empty after testing.
+
+All 21 existing tests passed.
+
+Day 20 reliability-layer tests completed.
+
+Important limitation: Redis idempotency suppresses duplicates after a successful send has been recorded. It cannot guarantee exactly-once delivery across every crash window—for example, if SMTP accepts an email and the worker crashes before writing the Redis sent marker. A stronger design would require an idempotent email provider or a reconciliation strategy for that failure window.

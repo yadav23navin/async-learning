@@ -1,6 +1,6 @@
 # MiniTrack
 
-MiniTrack is a task-management API built with Express.js to practice backend architecture, database access, Elasticsearch, pagination, and streaming.
+MiniTrack is a task-management API built with Express.js to practice backend architecture, database access, Elasticsearch, pagination, streaming, caching, and asynchronous messaging.
 
 ## Architecture
 
@@ -16,10 +16,11 @@ The application separates responsibilities into layers:
 
 Request flow:
 
-```text
 Request
    ↓
 Route
+   ↓
+Validation Middleware
    ↓
 Controller
    ↓
@@ -28,7 +29,8 @@ Service
 Repository
    ↓
 Database / Elasticsearch
-```
+
+For asynchronous email notifications, the service publishes domain events to RabbitMQ. A separate worker consumes these events and sends emails through MailHog.
 
 ## Technologies
 
@@ -36,6 +38,9 @@ Database / Elasticsearch
 - Express.js
 - PostgreSQL
 - Elasticsearch
+- Redis
+- RabbitMQ
+- MailHog
 - JavaScript
 - npm
 
@@ -98,7 +103,7 @@ The export supports the filters implemented by the search endpoint. CSV values a
 
 ## Pagination and Performance
 
-MiniTrack also includes learning exercises for offset pagination, cursor pagination, and Elasticsearch `search_after`.
+MiniTrack includes learning exercises for offset pagination, cursor pagination, and Elasticsearch `search_after`.
 
 The benchmark script is:
 
@@ -112,7 +117,7 @@ The benchmark compares search latency at different page depths. Results depend o
 
 The `scripts/` directory contains scripts for loading work items and labels into Elasticsearch.
 
-Check the script's options and required environment variables before running a data-loading script.
+Check each script's options and required environment variables before running a data-loading script.
 
 ## Configuration
 
@@ -142,6 +147,219 @@ npm run dev
 
 The API runs on port `3000` when configured with the project's current local settings.
 
+## Day 19 — RabbitMQ Event-Driven Email Notifications
+
+### Objective
+
+Implement asynchronous email notifications using RabbitMQ so that email delivery happens outside the API request's synchronous path.
+
+### Architecture
+
+```text
+Client
+   |
+   v
+Express API
+   |
+   +----> PostgreSQL
+   |      Create / update work item
+   |
+   +----> Redis
+   |      Cache invalidation
+   |
+   +----> RabbitMQ Publisher
+              |
+              v
+       work_items.events
+          (Topic Exchange)
+              |
+              +---- work_item.created
+              |          |
+              |          v
+              |   work_item_created.email
+              |
+              +---- work_item.assigned
+                         |
+                         v
+                 work_item_assigned.email
+                         |
+                         v
+                    Email Worker
+                         |
+                         v
+                    MailHog SMTP
+                         |
+                         v
+                    MailHog Inbox
+```
+
+### Events
+
+**1. `work_item.created`**
+
+Published when a new work item is created. The event contains:
+
+- Work-item ID
+- Project ID
+- Title
+
+**2. `work_item.assigned`**
+
+Published when a work item's `assignee_id` is updated. The event contains:
+
+- Work-item ID
+- Project ID
+- Title
+- Assignee ID
+
+Each event includes a unique event ID, event type, timestamp, and event data.
+
+### RabbitMQ Topology
+
+| Component | Name | Purpose |
+|---|---|---|
+| Topic exchange | `work_items.events` | Routes work-item events |
+| Queue | `work_item_created.email` | Receives creation events |
+| Queue | `work_item_assigned.email` | Receives assignment events |
+| Direct exchange | `work_items.dead` | Routes rejected messages |
+| Dead-letter queue | `work_item_created.email.failed` | Stores failed creation notifications |
+| Dead-letter queue | `work_item_assigned.email.failed` | Stores failed assignment notifications |
+
+The publisher and worker declare durable exchanges and queues. Event messages are published as persistent messages.
+
+### Reliability and Acknowledgements
+
+- **Publisher confirmations:** The API waits for RabbitMQ to confirm publication.
+- **Manual acknowledgements:** The worker acknowledges a message only after `sendMail` succeeds.
+- **Prefetch:** `prefetch(1)` limits the worker to one unacknowledged message at a time.
+- **Dead-letter queues:** Failed messages are rejected without requeue and routed to durable failed-message queues.
+- **Separate worker:** Email delivery is handled independently of the API request.
+
+Rejecting a failed message without requeue prevents an endless retry loop for messages that cannot succeed. A production system may additionally implement bounded retries for transient failures, dead-letter monitoring, and idempotent processing.
+
+### Local Setup
+
+Start RabbitMQ and MailHog:
+
+```bash
+docker compose up -d
+```
+
+Start the API in one terminal:
+
+```bash
+npm run dev
+```
+
+Start the email worker in another terminal:
+
+```bash
+npm run worker:email
+```
+
+The worker should display:
+
+```text
+Email worker connected. Waiting for messages...
+```
+
+Keep both the API and worker running during testing.
+
+### Local Services
+
+| Service | URL |
+|---|---|
+| API | http://localhost:3000 |
+| RabbitMQ Management UI | http://localhost:15672 |
+| MailHog Inbox | http://localhost:8025 |
+| MailHog SMTP | `localhost:1025` |
+
+RabbitMQ's default local development credentials are `guest` / `guest`.
+
+MailHog captures test emails so they can be inspected in the inbox instead of being delivered to real recipients.
+
+### Environment Variables
+
+The notification implementation supports the following variables:
+
+- `RABBITMQ_URL` — RabbitMQ connection URL; defaults to `amqp://localhost:5672`.
+- `SMTP_HOST` — SMTP host; defaults to `localhost`.
+- `SMTP_PORT` — SMTP port; defaults to `1025`.
+- `NOTIFICATION_EMAIL_FROM` — sender email address.
+- `NOTIFICATION_EMAIL_TO` — test recipient email address.
+
+The default worker recipient is `developer@example.test`. The current implementation sends notifications to this configured test recipient rather than automatically looking up the assignee's email address.
+
+### End-to-End Testing
+
+#### 1. Test work-item creation
+
+```bash
+curl -i -X POST http://localhost:3000/projects/1/work-items \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Day 19 RabbitMQ email test"}'
+```
+
+Expected result: the API returns `201 Created`.
+
+The worker should log a message similar to:
+
+```text
+Email sent for work_item.created; event ID: <event-id>
+```
+
+#### 2. Test work-item assignment
+
+Assign an existing work item to a valid user ID:
+
+```bash
+curl -i -X PATCH http://localhost:3000/work-items/500339 \
+  -H 'Content-Type: application/json' \
+  -d '{"assignee_id":1}'
+```
+
+Expected result: the API successfully updates the assignment, and the worker logs a message similar to:
+
+```text
+Email sent for work_item.assigned; event ID: <event-id>
+```
+
+#### 3. Verify email delivery
+
+Open the MailHog inbox:
+
+http://localhost:8025
+
+Verify that the creation and assignment notification emails are present.
+
+### Verified Results
+
+During local testing:
+
+- Created a work item in project `1`; the API returned `201 Created`.
+- The worker successfully processed `work_item.created`.
+- Assigned work item `500339` to user `1`.
+- The worker successfully processed `work_item.assigned`.
+- Both event types produced successful email-send logs.
+
+### Important Design Considerations
+
+**API latency**
+
+The API waits for the database operation, cache invalidation, and RabbitMQ publisher confirmation. It does not wait for the email worker to finish sending the email.
+
+**Database and broker consistency**
+
+A database write and RabbitMQ publication are not one atomic transaction. If the database write succeeds but event publication fails, the event may be lost. A transactional outbox is a stronger production design for addressing this consistency problem.
+
+**Duplicate delivery**
+
+Messages can be delivered or processed more than once under certain failure conditions. Production email handling should consider idempotency or deduplication to prevent duplicate notifications.
+
+**Failure monitoring**
+
+Dead-letter queues preserve rejected messages for investigation. Production systems should monitor these queues and define an operational process for diagnosing and replaying failed events safely.
+
 ## Learning Goals
 
 - Layered backend architecture
@@ -153,3 +371,9 @@ The API runs on port `3000` when configured with the project's current local set
 - Streaming CSV responses
 - Backpressure and memory monitoring
 - Performance benchmarking
+- RabbitMQ exchanges, queues, and routing keys
+- Asynchronous event-driven architecture
+- Manual acknowledgements and prefetch
+- Dead-letter queues and failure handling
+- Email testing with MailHog
+- Transactional outbox and idempotency concepts

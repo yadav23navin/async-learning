@@ -274,12 +274,33 @@ const update = async (id, data) => {
     await client.connect();
 
     try {
+        const fields = [];
+        const values = [];
+
+        if (data.title !== undefined) {
+            values.push(data.title);
+            fields.push(`title = $${values.length}`);
+        }
+
+        if (data.assignee_id !== undefined) {
+            values.push(data.assignee_id);
+            fields.push(`assignee_id = $${values.length}`);
+        }
+
+        if (fields.length === 0) {
+            return null;
+        }
+
+        fields.push("updated_at = NOW()");
+        values.push(id);
+
         const result = await client.query(
             `UPDATE work_items
-             SET title = $1, updated_at = NOW()
-             WHERE id = $2
-             RETURNING id, project_id, title, status, priority, created_at`,
-            [data.title, id]
+             SET ${fields.join(", ")}
+             WHERE id = $${values.length}
+             RETURNING id, project_id, title, status, priority,
+                       assignee_id, created_at, updated_at`,
+            values
         );
 
         return result.rows[0] ?? null;

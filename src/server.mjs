@@ -33,6 +33,7 @@ import redisClient from "./redisClient.mjs";
 import cacheWorkItemsResponse from "./cacheWorkItemsResponse.mjs";
 import createReferenceRoutes from "./routes/referenceRoutes.mjs";
 import { getBackendCallMetrics, resetBackendCallMetrics } from "./backendCallMetrics.mjs";
+import createRabbitPublisher from "./messaging/rabbitmq.mjs";
 
 
 const projectRepository = createProjectRepository();                                   // this is responsible for check project repository
@@ -51,9 +52,13 @@ const projectRoutes = createProjectRoutes({                                     
 
 const workItemRepository = createWorkItemRepository();
 
+const rabbitPublisher = createRabbitPublisher();
+const notificationsEnabled = process.env.DISABLE_EVENT_PUBLISHING !== "1";
+
 const workItemService = createWorkItemService({
     workItemRepository,
-    projectRepository
+    projectRepository,
+    publishEvent: notificationsEnabled ? rabbitPublisher.publish : async () => {}
 });
 
 const workItemController = createWorkItemController({
@@ -229,6 +234,12 @@ const startServer = async () => {
     try {
         await redisClient.connect();
         console.log("Redis connected");
+
+        if (notificationsEnabled) {
+            await rabbitPublisher.connect();
+        } else {
+            console.log("RabbitMQ publishing disabled for benchmark");
+        }
 
         const port = Number(process.env.PORT || 3000);
         app.listen(port, () => {
