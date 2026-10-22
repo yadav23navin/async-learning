@@ -2727,3 +2727,282 @@ All 21 existing tests passed.
 Day 20 reliability-layer tests completed.
 
 Important limitation: Redis idempotency suppresses duplicates after a successful send has been recorded. It cannot guarantee exactly-once delivery across every crash window—for example, if SMTP accepts an email and the worker crashes before writing the Redis sent marker. A stronger design would require an idempotent email provider or a reconciliation strategy for that failure window.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 21 — Build/Ship: Async Observability & Load Testing
+
+Date: 22 October 2026
+Project: async-learning
+
+Goal
+
+Ship the RabbitMQ notification workflow with correlation IDs, observable queue/worker metrics, a 10,000-event load test, and updated documentation.
+
+1. Start the email worker
+
+Command
+
+cd ~/Documents/async-learning && npm run worker:email
+
+Observed output
+
+> worker:email
+> node src/workers/emailWorker.mjs
+
+[queue-depth] work_item_created.email: ready=0
+[queue-depth] work_item_created.email.retry.1: ready=0
+[queue-depth] work_item_created.email.retry.2: ready=0
+
+The worker starts and reports queue depths. Additional queue-depth and DLQ-depth logs are emitted during operation.
+
+2. Test the work-item assignment event
+
+Command
+
+curl -sS -X PATCH http://localhost:3000/work-items/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"assignee_id":1}'
+
+Result
+
+{
+  "success": true,
+  "workItem": {
+    "id": "1",
+    "project_id": "1",
+    "title": "Writer A edit",
+    "status": "done",
+    "priority": "high",
+    "assignee_id": "1",
+    "created_at": "2026-09-23T06:12:10.831Z",
+    "updated_at": "2026-10-22T06:53:03.310Z"
+  }
+}
+
+The API successfully updated the work item. The worker processed the assignment event.
+
+Worker output
+
+Processing work_item.assigned; event ID: a787e0d6-95db-45f7-8620-a6412aeb4f6d; correlation ID: e88b4219-a3e5-4785-b0eb-2e7bb579330b; attempt 1/3
+Assignment email skipped; preference disabled for user 1
+Event processed; event ID: a787e0d6-95db-45f7-8620-a6412aeb4f6d; correlation ID: e88b4219-a3e5-4785-b0eb-2e7bb579330b; attempt 1
+
+What this verifies
+
+The event has an event ID and correlation ID.
+
+The worker logs the same correlation ID when processing and completing the event.
+
+The assignment email was skipped because the user's notification preference was disabled.
+
+Remaining verification: The matching API-side event_published log was not captured, so a live publisher-to-worker correlation ID match remains unverified.
+
+3. Inspect correlation ID publishing code
+
+Command
+
+cd ~/Documents/async-learning && \
+grep -n -C 4 'event_published\|correlationId' src/messaging/rabbitmq.mjs
+
+Relevant output
+
+89:        const eventId = randomUUID();
+90:        const correlationId = randomUUID();
+
+92:        channel.publish(
+...
+96:                eventId,
+97:                correlationId,
+98:                eventType,
+...
+105:                messageId: eventId,
+106:                correlationId,
+...
+111:        await channel.waitForConfirms();
+112:        console.log(JSON.stringify({
+113:            event: "event_published",
+114:            eventId,
+115:            correlationId,
+116:            eventType
+117:        }));
+
+Result: The publisher generates a correlation ID, includes it in the message body and AMQP properties, waits for RabbitMQ publisher confirms, and then logs the event.
+
+4. Check whether publisher logs were saved to files
+
+Command
+
+cd ~/Documents/async-learning && \
+grep -n 'event_published' logs/*.log 2>/dev/null | tail -10
+
+Result
+
+(no output)
+
+No matching log lines were found in logs/*.log. The publisher logs may be going to the API terminal instead.
+
+5. Inspect runtime metrics
+
+Command
+
+curl -s http://localhost:3000/metrics
+
+Observed output
+
+{
+  "queueDepths": {
+    "work_item_created.email": 0,
+    "work_item_created.email.retry.1": 0,
+    "work_item_created.email.retry.2": 0,
+    "work_item_created.email.failed": 1,
+    "work_item_assigned.email": 0,
+    "work_item_assigned.email.retry.1": 0,
+    "work_item_assigned.email.retry.2": 0,
+    "work_item_assigned.email.failed": 1,
+    "total": 2
+  },
+  "processedCount": 6,
+  "failureCount": 0
+}
+
+Result
+
+Main and retry queues had zero ready messages at the time of this snapshot.
+
+Total ready messages across the reported queues: 2.
+
+Processed count: 6.
+
+Failure count: 0.
+
+Each of the two failed-message queues contained one ready message.
+
+These are runtime snapshots, not permanent totals.
+
+6. Clean up the previous load-test queue
+
+An earlier load-test run had accidentally accumulated 20,000 ready messages. The dedicated test queue was deleted before the final run.
+
+Command
+
+docker exec minitrack-rabbitmq rabbitmqctl delete_queue day21.loadtest
+
+Result
+
+Queue was successfully deleted with 20000 ready messages
+
+This removed the old test queue and its accumulated messages. The final load test was then run against a fresh queue.
+
+7. Run the 10,000-event RabbitMQ load test
+
+Command
+
+cd ~/Documents/async-learning && \
+node scripts/load-rabbitmq-10k.mjs
+
+Final successful output
+
+{
+  "published": 10000,
+  "requested": 10000,
+  "elapsedSeconds": 0.53,
+  "throughputEventsPerSecond": 18793,
+  "peakQueueDepth": 10000,
+  "publishFailures": 0,
+  "queue": "day21.loadtest"
+}
+
+Results
+
+Measurement
+
+Result
+
+Events requested
+
+10,000
+
+Events published
+
+10,000
+
+Elapsed time
+
+0.53 seconds
+
+Throughput
+
+18,793 events/second
+
+Peak queue depth
+
+10,000
+
+Publish failures
+
+0
+
+Queue
+
+day21.loadtest
+
+Interpretation: All 10,000 messages were published successfully in the measured run. The dedicated queue reached a peak depth of 10,000 because no worker was consuming its load-test messages. This measured publish throughput, not email delivery or end-to-end processing throughput.
+
+The test queue may still contain the 10,000 messages from this run.
+
+8. Run automated tests
+
+Command
+
+cd ~/Documents/async-learning && npm test
+
+Result
+
+21 tests passed
+0 tests failed
+
+Some tests printed error stack traces for simulated failures. The test suite still completed successfully.
+
+9. Update README documentation
+
+The README was updated to document:
+
+Bounded retries with 2-second and 4-second backoff.
+
+A maximum of three processing attempts.
+
+Dead-letter handling for failed messages.
+
+Redis idempotency keys and processing locks.
+
+Assignment notification preference lookup, with database fallback.
+
+The /metrics endpoint.
+
+The 10,000-event load-test command and measured results.
+
+Load-test documentation
+
+Events published:       10,000
+Elapsed time:           0.53 seconds
+Throughput:              18,793 events/second
+Peak queue depth:        10,000
+Publish failures:        0
+
+The topology documentation should also show the retry queues:
+
+work_items.events (topic exchange)
+    ├── work_item_created.email
+    │     ├── work_item_created.email.retry.1
+    │     ├── work_item_created.email.retry.2
+    │     └── work_item_created.email.failed
+    │
+    └── work_item_assigned.email
+          ├── work_item_assigned.email.retry.1
+          ├── work_item_assigned.email.retry.2
+          └── work_item_assigned.email.failed
+
+work_items.dead (dead-letter exchange)
+
+Confirm the final README diagram reflects the actual bindings before treating the topology documentation as fully verified.

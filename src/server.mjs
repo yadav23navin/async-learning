@@ -223,6 +223,24 @@ app.use(cacheWorkItemsResponse);
 app.use("/tasks", taskRoutes);                                     // this is responsible for check task routes
 app.use("/projects", projectRoutes);                                 // this is responsible for check project routes
 app.use("/dashboard", dashboardRoutes);                            // this is responsible for check dashboard routes
+app.get("/metrics", async (req, res, next) => {
+    try {
+        const [processed, failed, queueDepths] = await Promise.all([
+            redisClient.get("async:metrics:processed"),
+            redisClient.get("async:metrics:failed"),
+            rabbitPublisher.getQueueDepths()
+        ]);
+
+        res.json({
+            queueDepths,
+            processedCount: Number(processed || 0),
+            failureCount: Number(failed || 0)
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
 app.use("/", workItemRoutes);                                     // this is responsible for check work item routes
 app.use("/search", searchRoutes);
 app.use("/reference", referenceRoutes);                                 // this is responsible for check search routes

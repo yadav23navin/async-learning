@@ -235,7 +235,7 @@ The publisher and worker declare durable exchanges and queues. Event messages ar
 - **Dead-letter queues:** Failed messages are rejected without requeue and routed to durable failed-message queues.
 - **Separate worker:** Email delivery is handled independently of the API request.
 
-Rejecting a failed message without requeue prevents an endless retry loop for messages that cannot succeed. A production system may additionally implement bounded retries for transient failures, dead-letter monitoring, and idempotent processing.
+Transient failures retry with 2-second and 4-second backoffs, for up to three total attempts. Permanent failures go directly to the DLQ. Redis-backed idempotency keys suppress duplicate processing, and processing locks reduce concurrent duplicate work.
 
 ### Local Setup
 
@@ -288,7 +288,7 @@ The notification implementation supports the following variables:
 - `NOTIFICATION_EMAIL_FROM` — sender email address.
 - `NOTIFICATION_EMAIL_TO` — test recipient email address.
 
-The default worker recipient is `developer@example.test`. The current implementation sends notifications to this configured test recipient rather than automatically looking up the assignee's email address.
+For assignment events, the worker looks up the assignee and checks their notification preference in Redis, falling back to the database when needed. Emails are sent through the configured SMTP service when notifications are enabled.
 
 ### End-to-End Testing
 
@@ -359,6 +359,14 @@ Messages can be delivered or processed more than once under certain failure cond
 **Failure monitoring**
 
 Dead-letter queues preserve rejected messages for investigation. Production systems should monitor these queues and define an operational process for diagnosing and replaying failed events safely.
+
+## Observability and Load Testing
+
+`GET /metrics` reports queue depths, processed-event count, and failure count.
+
+Run `node scripts/load-rabbitmq-10k.mjs` to publish 10,000 persistent test messages to the dedicated `day21.loadtest` queue. This does not send notification emails. Use an empty queue and run the script once for a reliable peak-depth measurement.
+
+Latest local run: 10,000 events in 0.53 seconds, approximately 18,793 events/second, peak queue depth 10,000, and 0 publish failures. Results depend on local conditions.
 
 ## Learning Goals
 

@@ -1,6 +1,7 @@
 import amqp from "amqplib";
 import nodemailer from "nodemailer";
 import { createClient } from "redis";
+import createNotificationRepository from "../repositories/notificationRepository.mjs";
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://localhost:5672";
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
@@ -21,6 +22,7 @@ const transporter = nodemailer.createTransport({
 });
 
 const redis = createClient({ url: REDIS_URL });
+const notificationRepository = createNotificationRepository();
 redis.on("error", (error) => {
   console.error("Redis error:", error.message);
 });
@@ -87,6 +89,7 @@ async function startWorker() {
 
         const sentKey = `email:sent:${event.eventId}`;
         lockKey = `email:processing:${event.eventId}`;
+        const correlationId = event.correlationId || message.properties.correlationId || event.eventId;
 
         if (await redis.exists(sentKey)) {
           console.log(`Duplicate suppressed; event ID: ${event.eventId}`);
@@ -102,7 +105,7 @@ async function startWorker() {
         }
 
         console.log(
-          `Processing ${event.eventType}; event ID: ${event.eventId}; attempt ${attempt}/${MAX_ATTEMPTS}`
+          `Processing ${event.eventType}; event ID: ${event.eventId}; correlation ID: ${correlationId}; attempt ${attempt}/${MAX_ATTEMPTS}`
         );
 
         if (process.env.WORKER_ALWAYS_FAIL === "1") {
@@ -118,22 +121,62 @@ async function startWorker() {
         const data = event.data;
         let subject;
         let text;
+        let recipientEmail = to;
+        let shouldSendEmail = true;
+        let assignmentRecipient;
 
         if (eventType === "work_item.created") {
           subject = `Work item created: ${data.title}`;
           text = `A work item was created.\n\nWork item ID: ${data.work_item_id}\nProject ID: ${data.project_id}\nTitle: ${data.title}`;
         } else {
+          assignmentRecipient = await notificationRepository.findRecipientById(data.assignee_id);
+          if (!assignmentRecipient) {
+            const error = new Error(`Assignee ${data.assignee_id} was not found`);
+            error.permanent = true;
+            throw error;
+          }
+
+          recipientEmail = assignmentRecipient.email;
+          const preferenceKey = `notification:preferences:${assignmentRecipient.id}`;
+          const cachedPreference = await redis.get(preferenceKey);
+          let emailEnabled;
+
+          if (cachedPreference === null) {
+            emailEnabled = await notificationRepository.getAssignmentEmailPreference(assignmentRecipient.id);
+            await redis.set(preferenceKey, String(emailEnabled), { EX: 300 });
+          } else {
+            emailEnabled = cachedPreference === "true";
+          }
+
+          shouldSendEmail = emailEnabled;
           subject = `Work item assigned: ${data.title}`;
           text = `A work item was assigned.\n\nWork item ID: ${data.work_item_id}\nProject ID: ${data.project_id}\nTitle: ${data.title}\nAssignee ID: ${data.assignee_id}`;
         }
 
-        await transporter.sendMail({ from, to, subject, text });
+        if (shouldSendEmail) {
+          await transporter.sendMail({ from, to: recipientEmail, subject, text });
+          console.log(`Email delivered to ${recipientEmail}`);
+        } else {
+          console.log(`Assignment email skipped; preference disabled for user ${assignmentRecipient.id}`);
+        }
+
+        if (eventType === "work_item.assigned") {
+          await notificationRepository.recordAssignmentActivity({
+            projectId: data.project_id,
+            workItemId: data.work_item_id,
+            userId: data.user_id || null,
+            assigneeId: data.assignee_id,
+            eventId: event.eventId,
+            correlationId
+          });
+        }
 
         // Store completion before ACK so a broker redelivery is suppressed.
         await redis.set(sentKey, "1", { EX: 60 * 60 * 24 * 7 });
+        await redis.incr("async:metrics:processed");
         await redis.del(lockKey);
 
-        console.log(`Email sent; event ID: ${event.eventId}; attempt ${attempt}`);
+        console.log(`Event processed; event ID: ${event.eventId}; correlation ID: ${correlationId}; attempt ${attempt}`);
         channel.ack(message);
       } catch (error) {
         console.error(
@@ -160,6 +203,7 @@ async function startWorker() {
               persistent: true,
               contentType: message.properties.contentType || "application/json",
               messageId: event.eventId,
+              correlationId: event.correlationId || message.properties.correlationId || event.eventId,
               timestamp: Date.now(),
               headers: {
                 ...(message.properties.headers || {}),
@@ -177,7 +221,8 @@ async function startWorker() {
             channel.nack(message, false, true);
           }
         } else {
-          console.error(`Sending to DLQ after ${attempt} attempts`);
+          console.error(`Sending to DLQ after ${attempt} attempts; correlation ID: ${event?.correlationId || message.properties.correlationId || event?.eventId || "unknown"}`);
+          await redis.incr("async:metrics:failed");
           channel.nack(message, false, false);
         }
       }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import amqp from "amqplib";
 
 const EXCHANGE = "work_items.events";
@@ -85,13 +86,15 @@ const createRabbitPublisher = ({
             throw new Error(`Unsupported event type: ${eventType}`);
         }
 
-        const eventId = crypto.randomUUID();
+        const eventId = randomUUID();
+        const correlationId = randomUUID();
 
         channel.publish(
             EXCHANGE,
             eventType,
             Buffer.from(JSON.stringify({
                 eventId,
+                correlationId,
                 eventType,
                 occurredAt: new Date().toISOString(),
                 data: payload
@@ -100,11 +103,42 @@ const createRabbitPublisher = ({
                 persistent: true,
                 contentType: "application/json",
                 messageId: eventId,
+                correlationId,
                 timestamp: Date.now()
             }
         );
 
         await channel.waitForConfirms();
+        console.log(JSON.stringify({
+            event: "event_published",
+            eventId,
+            correlationId,
+            eventType
+        }));
+    };
+
+    const getQueueDepths = async () => {
+        if (!channel) throw new Error("RabbitMQ publisher is not connected");
+
+        const queues = [
+            "work_item_created.email",
+            "work_item_created.email.retry.1",
+            "work_item_created.email.retry.2",
+            "work_item_created.email.failed",
+            "work_item_assigned.email",
+            "work_item_assigned.email.retry.1",
+            "work_item_assigned.email.retry.2",
+            "work_item_assigned.email.failed"
+        ];
+
+        const depths = {};
+        for (const queue of queues) {
+            const result = await channel.checkQueue(queue);
+            depths[queue] = result.messageCount;
+        }
+
+        depths.total = Object.values(depths).reduce((sum, count) => sum + count, 0);
+        return depths;
     };
 
     const close = async () => {
@@ -116,7 +150,7 @@ const createRabbitPublisher = ({
         }
     };
 
-    return { connect, publish, close };
+    return { connect, publish, getQueueDepths, close };
 };
 
 export default createRabbitPublisher;
