@@ -3006,3 +3006,174 @@ work_items.events (topic exchange)
 work_items.dead (dead-letter exchange)
 
 Confirm the final README diagram reflects the actual bindings before treating the topology documentation as fully verified.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 22 — Daily Digest Job
+
+BUILD / SHIP
+
+Goal
+
+Build a daily digest job that sends each user one summary email at 09:00 IST when they have open work items due tomorrow. Use a Redis lock to prevent concurrent runs, support manual execution and dry-run mode, and record job results in PostgreSQL.
+
+Implementation
+
+Added migrations/005_daily_digest.sql.
+
+Added due_date to work_items.
+
+Added a partial index for open work items with an assignee and due date.
+
+Added digest_job_runs to track job start/finish times, users processed, emails sent, errors, status, and error details.
+
+Added src/repositories/digestRepository.mjs.
+
+Finds users with open items due tomorrow.
+
+Creates and finishes database run records.
+
+Added src/dailyDigest.mjs.
+
+Uses Asia/Kolkata for scheduling at 09:00 IST.
+
+Checks every 30 seconds.
+
+Uses a Redis lock to prevent simultaneous execution.
+
+Uses a Redis completion marker to skip a successfully completed scheduled date.
+
+Sends summary emails through Nodemailer.
+
+Supports --once and --dry-run.
+
+Added package scripts:
+
+npm run digest
+
+npm run digest:once
+
+Terminal Commands and Results
+
+1. Check available npm scripts
+
+Command:
+npm run
+
+Result:
+
+digest — starts the daily scheduler.
+
+digest:once — runs the digest manually once.
+
+2. Check JavaScript syntax
+
+Command:
+node --check src/dailyDigest.mjs
+
+Result:
+
+Passed with no syntax errors.
+
+3. Dry-run test
+
+Command:
+node src/dailyDigest.mjs --once --dry-run
+
+Observed output:
+
+[digest] run=3 dueDate=2026-10-24 users=1 dryRun=true
+[digest] DRY RUN user=1 email=aarav1@minitrack.local items=1
+[digest] finished run=3 status=success users=1 emails=0 errors=0
+
+Result:
+
+Found one user with one open item due tomorrow.
+
+Printed the recipient and item count.
+
+Sent zero emails.
+
+4. Manual email test
+
+Command:
+npm run digest:once
+
+Observed output:
+
+[digest] run=4 dueDate=2026-10-24 users=1 dryRun=false
+[digest] email sent user=1 items=1
+[digest] finished run=4 status=success users=1 emails=1 errors=0
+
+Result:
+
+Processed one user.
+
+Sent one email.
+
+Had zero errors.
+
+Confirmed the email arrived in MailHog at http://localhost:8025.
+
+5. Simultaneous-instance test
+
+Command:
+npm run digest:once & npm run digest:once & wait
+
+Observed output:
+
+[digest] another process holds the lock; skipping tick
+[digest] run=5 dueDate=2026-10-24 users=1 dryRun=false
+[digest] email sent user=1 items=1
+[digest] finished run=5 status=success users=1 emails=1 errors=0
+
+Result:
+
+One process acquired the Redis lock and sent one email.
+
+The other process skipped because the lock was held.
+
+Exactly one email was sent across the two simultaneous processes.
+
+6. Verify timezone conversion with UTC server timezone
+
+Command:
+TZ=UTC node --input-type=module -e "const d=new Date('2026-10-23T03:30:00Z'); console.log('Server timezone:',Intl.DateTimeFormat().resolvedOptions().timeZone); console.log('IST time:',new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(d));"
+
+Observed output:
+
+Server timezone: UTC
+IST time: 09:00
+
+Result:
+
+Confirmed that 03:30 UTC converts to 09:00 in Asia/Kolkata.
+
+This checked timezone conversion; it did not by itself execute the scheduler.
+
+7. Test scheduled idempotency under a simulated clock
+
+A temporary Node.js preload simulated 2026-10-23T03:30:00Z, equivalent to 09:00 IST. A temporary Redis marker was set for the test date, then the scheduler was started with TZ=UTC.
+
+Observed output:
+
+OK
+[digest] scheduler started; daily schedule 09:00 Asia/Kolkata; dryRun=false
+[digest] 2026-10-23 already completed; skipping
+(integer) 1
+
+Result:
+
+The scheduler reached the 09:00 IST path while the process timezone was UTC.
+
+The completion marker caused the scheduled run to skip.
+
+The final (integer) 1 confirmed that the temporary Redis marker was deleted.
+
+No email was sent by this idempotency test.
+
+Final Result
+
+The daily digest job is implemented. Dry-run behavior, manual email delivery, concurrent-run locking, timezone conversion, and scheduled completion-marker skipping were verified.
+
+A real scheduled execution at 09:00 IST on a live clock has not yet been observed.
