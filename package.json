@@ -5,7 +5,9 @@
     "stampede": "node scripts/stampede.mjs",
     "validate:api": "node scripts/validate-day17-api.mjs",
     "test": "node --test test/*.test.mjs",
-    "worker:email": "node src/workers/emailWorker.mjs"
+    "worker:email": "node src/workers/emailWorker.mjs",
+    "digest": "node src/dailyDigest.mjs",
+    "digest:once": "node src/dailyDigest.mjs --once"
   },
   "dependencies": {
     "@elastic/elasticsearch": "^9.5.1",
@@ -15,6 +17,5 @@
     "pg": "^8.23.0",
     "redis": "^6.3.0",
     "zod": "^4.6.5"
-  },
-  "scripts:worker:email": "node src/workers/emailWorker.mjs"
+  }
 }
