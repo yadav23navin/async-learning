@@ -3177,3 +3177,862 @@ Final Result
 The daily digest job is implemented. Dry-run behavior, manual email delivery, concurrent-run locking, timezone conversion, and scheduled completion-marker skipping were verified.
 
 A real scheduled execution at 09:00 IST on a live clock has not yet been observed.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 23 — Resumable Elasticsearch Backfill
+
+BUILD / SHIP
+
+1. Create a backup of the original script
+
+Command
+
+cp scripts/backfill.mjs scripts/backfill.mjs.bak
+
+Result
+
+Created a backup of the original backfill script at scripts/backfill.mjs.bak.
+
+2. Check JavaScript syntax
+
+Command
+
+node --check scripts/backfill.mjs
+
+Result
+
+No output.
+
+Syntax check passed.
+
+3. Run the dry-run preview
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000
+
+Observed output
+
+Cluster: docker-cluster
+Index: work_items
+Mode: DRY RUN
+Limit: 1000
+Batch size: 100
+Documents missing points: 500300
+Eligible for this run: 1000
+
+Five sample documents were previewed.
+
+No documents were modified during the dry run.
+
+4. Test a small backfill of 100 documents
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=100 --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Result
+
+Updated: 100
+Failures: 0
+
+Checkpoint created at .backfill/points-zero.json.
+
+5. Checkpoint protection when changing the run limit
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --apply
+
+Result
+
+The script refused to start because an existing checkpoint was present.
+
+The checkpoint needed to be moved before starting a separate job with a different limit.
+
+6. Move the earlier checkpoint aside
+
+Command
+
+mv .backfill/points-zero.json .backfill/points-zero-test100.json
+
+Result
+
+Preserved the checkpoint from the 100-document test under a different filename.
+
+7. Test stopping after 400 documents
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --stop-after=400 --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Observed result
+
+Job ID: cab00433-b4ac-436e-9dcf-798525670bef
+Updated: 400
+Skipped: 0
+Failures: 0
+Stopped: true
+Checkpoint saved
+
+The script stopped at the configured batch boundary.
+
+Progress was saved in .backfill/points-zero.json.
+
+8. Resume the first controlled-stop job
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Result
+
+Resumed from the saved checkpoint.
+
+Continued from 400 toward the 1,000-document limit.
+
+Completed 1,000 updates in total.
+
+Zero skipped and zero failed updates.
+
+9. Move completed checkpoints aside before separate jobs
+
+These checkpoint moves were performed to allow new independent runs without overwriting or reusing the previous completed job's checkpoint.
+
+Commands
+
+mv .backfill/points-zero.json .backfill/points-zero-completed1000.json
+
+mv .backfill/points-zero.json .backfill/points-zero-completed1000b.json
+
+mv .backfill/points-zero.json .backfill/points-zero-completed1000c.json
+
+Result
+
+Preserved the completed checkpoints under separate filenames.
+
+10. Additional 1,000-document apply runs
+
+The following command was run for separate 1,000-document jobs:
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --apply
+
+Confirmation entered each time
+
+APPLY docker-cluster/work_items
+
+Observed results
+
+Job d0dba942-4d46-4234-a324-d48d02f348f7: completed 1,000 updates, zero failures.
+
+Job e21c381e-af85-402a-84f5-5290482e3412: completed 1,000 updates, zero failures.
+
+The script completed too quickly for the attempted manual Ctrl+C interruption tests.
+
+11. Check an already completed checkpoint
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Result
+
+The script recognized that the corresponding job had already reached 1,000 updates.
+
+No additional updates were needed for that completed job.
+
+12. Repeat the controlled stop/resume test
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --stop-after=400 --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Observed output
+
+Job ID: c2c354cf-5ff6-4ec7-8763-0bfdfb030778
+Updated: 400
+Skipped: 0
+Failures: 0
+Stopped: true
+Checkpoint saved
+
+13. Resume the same job
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Observed result
+
+Same job ID: c2c354cf-5ff6-4ec7-8763-0bfdfb030778
+Previously completed: 400
+Resumed through: 500
+Resumed through: 600
+Resumed through: 700
+Resumed through: 800
+Resumed through: 900
+Resumed through: 1000
+Total updated: 1000
+Skipped: 0
+Failures: 0
+Stopped: false
+
+The same job ID was retained.
+
+The checkpoint allowed the job to continue from 400 rather than starting a new job.
+
+The controlled stop/resume test passed.
+
+14. Verify the Elasticsearch document counts
+
+Command
+
+ES_PASSWORD='ePS5j28X' node --input-type=module -e 'import es from "./src/elasticsearchClient.mjs"; try { console.log(JSON.stringify({missingPoints:(await es.count({index:"work_items",query:{bool:{must_not:[{exists:{field:"points"}}]}}})).count,zeroPoints:(await es.count({index:"work_items",query:{term:{points:0}}})).count},null,2)); } finally { await es.close(); }'
+
+Observed output from the earlier verification
+
+{
+  "missingPoints": 499200,
+  "zeroPoints": 1100
+}
+
+Interpretation:
+
+missingPoints counts documents that still do not have a points field.
+
+zeroPoints counts documents whose points value is 0.
+
+This verification was performed after the initial 100-document test and the first 1,000-document job.
+
+The last controlled stop/resume run started when the missing count was observed at 495800 and updated another 1,000 documents. The expected missing count afterward is 494800; a fresh verification after that final run was not recorded in the available output.
+
+15. Update the project log
+
+Command
+
+cat >> log.md <<'EOF'
+
+# Day 23 — Resumable Elasticsearch Backfill
+
+## BUILD / SHIP
+
+### Implemented
+- Created reusable `scripts/backfill.mjs`.
+- Added dry-run preview and explicit confirmation before writes.
+- Added target-cluster validation for `docker-cluster`.
+- Added batches of 100 documents.
+- Added checkpoint persistence in `.backfill/points-zero.json`.
+- Added `--limit`, `--apply`, `--resume`, and `--stop-after` options.
+- Updated missing `points` values to `0` in the `work_items` index.
+
+### Tests
+- `node --check scripts/backfill.mjs`: passed.
+- Dry run: found 500,300 documents missing `points`; previewed five sample documents without modifying data.
+- 100-document test: 100 updated, zero failures.
+- Additional 1,000-document jobs: completed with zero failures.
+- Controlled stop: stopped at 400 updates and saved a checkpoint.
+- Resume: continued the same job from 400 to 1,000 updates, with zero skipped and zero failed updates.
+- Elasticsearch count verification observed 499,200 missing `points` and 1,100 documents with `points: 0` after the initial test and first 1,000-document job.
+
+### Notes
+- Multiple independent 1,000-document jobs were run during testing.
+- The controlled stop/resume workflow passed.
+- An actual Ctrl+C/process-kill interruption was not demonstrated.
+- The entire index has not been backfilled; remaining documents still need processing if a full-index backfill is required.
+
+### Additional Tests — Final Completion
+
+#### 16. Test actual Ctrl+C interruption
+
+Command
+
+printf 'APPLY docker-cluster/work_items\n' | timeout --signal=INT --kill-after=5s 5s env ES_PASSWORD='ePS5j28X' BACKFILL_CHECKPOINT=.backfill/points-zero-sigint-test.json BACKFILL_DELAY_MS=1000 node scripts/backfill.mjs --limit=1000 --apply
+
+Observed result
+
+- Job ID: cb82c022-5610-4b0c-a631-a57017e24218
+- Updated before interruption: 300
+- Skipped: 0
+- Failures: 0
+- Ctrl+C was received.
+- The script stopped safely after the current batch.
+- Checkpoint was saved to `.backfill/points-zero-sigint-test.json`.
+
+Result: Passed. The interruption handler safely stopped the job and preserved its progress.
+
+#### 17. Resume after actual Ctrl+C
+
+Command
+
+printf 'APPLY docker-cluster/work_items\n' | env ES_PASSWORD='ePS5j28X' BACKFILL_CHECKPOINT=.backfill/points-zero-sigint-test.json node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Observed result
+
+- Same job ID: cb82c022-5610-4b0c-a631-a57017e24218
+- Previously completed: 300 updates
+- Resumed from 300 and continued through 400, 500, 600, 700, 800, 900, and 1,000.
+- Total updated: 1,000
+- Skipped: 0
+- Failures: 0
+- Stopped: false
+
+Result: Passed. The job resumed from its saved checkpoint rather than restarting from zero.
+
+#### 18. Verify completed-checkpoint behavior
+
+Command
+
+printf 'APPLY docker-cluster/work_items\n' | env ES_PASSWORD='ePS5j28X' BACKFILL_CHECKPOINT=.backfill/points-zero-sigint-test.json node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Observed output
+
+Resuming job cb82c022-5610-4b0c-a631-a57017e24218; successful updates so far: 1000.
+Requested update limit already reached.
+
+Result: Passed. The completed job performed no additional updates.
+
+Note: This verifies completed-checkpoint behavior, not a fresh independent rerun. A fresh job can process other documents that still lack `points`.
+
+#### 19. Final verification status
+
+- Dry-run safety: passed.
+- Explicit write confirmation and target-cluster validation: passed.
+- Batch processing and checkpoint persistence: passed.
+- Controlled stop/resume using `--stop-after=400`: passed.
+- Actual Ctrl+C interruption and resume: passed.
+- Completed-checkpoint no-op: passed.
+- The latest recorded pre-run count was 492,900 documents missing `points`. The subsequent resumed job updated 700 documents, so the expected missing count afterward is 492,200.
+- A fresh Elasticsearch count query after the final run was not recorded.
+- The full index has not been backfilled; this task intentionally used bounded test runs.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 25 — Elasticsearch Activity Timestamp Migration
+
+BUILD / SHIP
+
+1. Check the migration script syntax
+
+Command
+
+node --check scripts/backfill-last-activity.mjs
+
+Output
+
+No output — syntax check passed.
+
+What it means: Node checked the JavaScript syntax without executing the migration or changing Elasticsearch data.
+
+2. First migration attempt — authentication failure
+
+Command
+
+node scripts/backfill-last-activity.mjs
+
+Output
+
+Migration failed: ResponseError: security_exception
+security_exception: missing authentication credentials for REST request [/]
+status: 401
+
+What happened: Elasticsearch requires authentication. The script's Elasticsearch client reads the password from ES_PASSWORD, which was not set in that terminal.
+
+3. Run the migration with authentication
+
+Command
+
+ES_PASSWORD='<your-local-ES-password>' node scripts/backfill-last-activity.mjs
+
+Observed output
+
+Processed 500000; updated 500000
+
+=== Scan + bulk summary ===
+{
+  "beforeCount": 500300,
+  "afterCount": 500300,
+  "processed": 500300,
+  "updated": 500300,
+  "elapsedSeconds": 77.3,
+  "searchLoad": {
+    "requests": 720,
+    "errors": 0,
+    "p50_ms": 6.13,
+    "p95_ms": 10.96,
+    "max_ms": 217.99
+  }
+}
+
+What it means:
+
+beforeCount and afterCount are equal, so the migration did not change the number of documents.
+
+All 500,300 documents were processed and updated.
+
+The migration took 77.3 seconds.
+
+The search load generator ran alongside the migration.
+
+All 720 search requests succeeded.
+
+Search p95 latency during the migration was 10.96 ms.
+
+How the scan + bulk approach works:
+
+Read a batch of documents from Elasticsearch.
+
+Collect their work_item_id values.
+
+Query PostgreSQL for each work item's latest activity using MAX(created_at).
+
+Build bulk update operations.
+
+Write last_activity_at to Elasticsearch.
+
+Continue until all documents are processed.
+
+The new field stores the latest related activity timestamp. Items without activities receive null.
+
+4. Verify the new field is populated
+
+Command
+
+curl -s -u 'elastic:<your-local-ES-password>' \
+  -X POST 'http://localhost:9200/work_items_v2/_count' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"exists":{"field":"last_activity_at"}}}'
+
+Output
+
+{
+  "count": 500000,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  }
+}
+
+What it means: 500,000 documents have a non-null last_activity_at. Elasticsearch's exists query does not count fields whose value is null.
+
+5. Find documents with a missing timestamp
+
+Command
+
+curl -s -u 'elastic:<your-local-ES-password>' \
+  -X POST 'http://localhost:9200/work_items_v2/_search' \
+  -H 'Content-Type: application/json' \
+  -d '{"size":5,"query":{"bool":{"must_not":[{"exists":{"field":"last_activity_at"}}]}},"_source":["work_item_id","last_activity_at"]}'
+
+Observed output — relevant fields
+
+{
+  "hits": {
+    "total": {
+      "value": 300,
+      "relation": "eq"
+    },
+    "hits": [
+      {
+        "_id": "500001",
+        "_source": {
+          "work_item_id": "500001",
+          "last_activity_at": null
+        }
+      }
+    ]
+  }
+}
+
+What it means: 300 documents have a null timestamp. The response showed these fields for the sample document. The complete response contained five sample hits.
+
+6. Verify those 300 items in PostgreSQL
+
+First attempt
+
+PGPASSWORD='<your-PostgreSQL-password>' psql -h localhost -U minitrack -d minitrack -c "SELECT COUNT(DISTINCT w.work_item_id) AS missing_items_with_activities FROM work_items w JOIN activities a ON a.work_item_id = w.work_item_id WHERE w.work_item_id BETWEEN 500001 AND 500300;"
+
+Output
+
+ERROR: column w.work_item_id does not exist
+HINT: Perhaps you meant to reference the column "a.work_item_id".
+
+What happened: The PostgreSQL work_items table uses id as its primary key, not work_item_id.
+
+Corrected command
+
+PGPASSWORD='<your-PostgreSQL-password>' psql -h localhost -U minitrack -d minitrack -c "SELECT COUNT(DISTINCT w.id) AS missing_items_with_activities FROM work_items w JOIN activities a ON a.work_item_id = w.id WHERE w.id BETWEEN 500001 AND 500300;"
+
+Output
+
+ missing_items_with_activities
+--------------------------------
+                              0
+(1 row)
+
+What it means: None of the 300 work items in the checked ID range has a matching activity row. Their null timestamps are expected.
+
+Final field-population summary
+
+Total documents: 500,300
+
+Documents with a timestamp: 500,000
+
+Documents without a timestamp: 300
+
+Verified missing items with activities: 0
+
+7. Benchmark Elasticsearch update_by_query with Painless
+
+Command
+
+time curl -s -u 'elastic:<your-local-ES-password>' \
+  -X POST 'http://localhost:9200/work_items_v2/_update_by_query?refresh=true&conflicts=proceed' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"script":{"lang":"painless","source":"ctx.op = \"noop\""}}'
+
+Observed output
+
+{
+  "took": 8831,
+  "timed_out": false,
+  "total": 500300,
+  "updated": 0,
+  "deleted": 0,
+  "batches": 501,
+  "version_conflicts": 0,
+  "noops": 500300,
+  "retries": {
+    "bulk": 0,
+    "search": 0
+  },
+  "throttled_millis": 0,
+  "requests_per_second": -1.0,
+  "throttled_until_millis": 0,
+  "failures": []
+}
+
+Shell timing
+
+real    0m8.897s
+user    0m0.012s
+sys     0m0.006s
+
+What it means:
+
+Elasticsearch scanned 500,300 documents.
+
+The Painless script set ctx.op = "noop", telling Elasticsearch not to modify the document.
+
+All 500,300 documents were no-ops.
+
+The operation took about 8.9 seconds.
+
+There were no version conflicts or reported failures.
+
+Important limitation: Painless cannot query the PostgreSQL activities table. This benchmark measures Elasticsearch-side scanning and script execution only. It does not calculate or populate the latest activity timestamp, so it is not equivalent to the scan + bulk migration.
+
+8. Search latency comparison
+
+The baseline was measured before the migration.
+
+Metric
+
+Baseline
+
+During scan + bulk
+
+p50
+
+Not recorded in the available baseline results
+
+6.13 ms
+
+p95
+
+12.28 ms
+
+10.96 ms
+
+Maximum
+
+88.97 ms
+
+217.99 ms
+
+Search errors
+
+Not recorded in the available baseline results
+
+0
+
+Interpretation:
+
+Baseline p95 was 12.28 ms.
+
+During the migration, p95 was 10.96 ms.
+
+The observed p95 decreased by 1.32 ms in this run.
+
+The maximum request latency reached 217.99 ms, so occasional slower requests still occurred.
+
+Search latency was not measured during the Painless no-op benchmark.
+
+This result applies to the measured run only; it does not guarantee that every workload will behave the same way.
+
+9. Migration plan and estimated versus actual time
+
+Initial estimated total time: 50–160 minutes.
+
+Planned steps:
+
+Inspect the mapping, PostgreSQL activity relationship, and search endpoint.
+
+Add the last_activity_at mapping.
+
+Implement scan + bulk migration.
+
+Benchmark Painless update_by_query where applicable.
+
+Verify document count and timestamp population.
+
+Measure search latency during the migration.
+
+Record the results.
+
+Actual scan + bulk execution time: 77.3 seconds, or approximately 1 minute 17 seconds.
+
+The scan + bulk execution was substantially faster than the initial estimate. The 77.3-second figure is the measured migration runtime, not the total time spent planning, troubleshooting, and documenting.
+
+# Day 24 — Elasticsearch Activity Timestamp Migration (Final Results)
+
+1. Add the temporary staging field mapping
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X PUT 'http://localhost:9200/work_items_v2/_mapping' -H 'Content-Type: application/json' -d '{"properties":{"last_activity_at_stage":{"type":"date","format":"epoch_millis"}}}'
+
+Expected successful response:
+
+{"acknowledged":true}
+
+Note: An initial attempt returned HTTP 401 because the password placeholder was used literally. The corrected command was then used.
+
+2. Create the staging script
+
+Command:
+
+cp scripts/backfill-last-activity.mjs scripts/stage-last-activity.mjs
+
+Change the output field in the copied script:
+
+sed -i 's/last_activity_at:/last_activity_at_stage:/g' scripts/stage-last-activity.mjs
+
+The original migration script remains unchanged.
+
+3. Run the staging scan + bulk operation
+
+Command:
+
+ES_PASSWORD='ePS5j28X' node scripts/stage-last-activity.mjs
+
+Actual output:
+
+Processed 500000; updated 500000
+
+=== Scan + bulk summary ===
+{
+  "beforeCount": 500300,
+  "afterCount": 500300,
+  "processed": 500300,
+  "updated": 500300,
+  "elapsedSeconds": 66.98,
+  "searchLoad": {
+    "requests": 628,
+    "errors": 0,
+    "p50_ms": 5.39,
+    "p95_ms": 9.54,
+    "max_ms": 201.32
+  }
+}
+
+Results:
+
+Processed: 500,300 documents
+
+Updated: 500,300 documents
+
+Runtime: 66.98 seconds
+
+Search requests: 628
+
+Search errors: 0
+
+Search p95 latency: 9.54 ms
+
+4. Copy staged timestamps using Painless
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X POST 'http://localhost:9200/work_items_v2/_update_by_query?refresh=true&conflicts=proceed' -H 'Content-Type: application/json' -d '{"query":{"match_all":{}},"script":{"lang":"painless","source":"if (ctx._source.containsKey(\"last_activity_at_stage\")) { ctx._source.last_activity_at = ctx._source.last_activity_at_stage; ctx._source.remove(\"last_activity_at_stage\"); } else { ctx.op = \"noop\"; }"}}'
+
+Actual output:
+
+{
+  "took": 24614,
+  "timed_out": false,
+  "total": 500300,
+  "updated": 500300,
+  "deleted": 0,
+  "batches": 501,
+  "version_conflicts": 0,
+  "noops": 0,
+  "retries": {
+    "bulk": 0,
+    "search": 0
+  },
+  "throttled_millis": 0,
+  "requests_per_second": -1.0,
+  "failures": []
+}
+
+Results:
+
+Documents updated: 500,300
+
+Elasticsearch-reported runtime: 24.614 seconds
+
+Version conflicts: 0
+
+No-ops: 0
+
+Failures: 0
+
+The script copied the staged values into last_activity_at and removed last_activity_at_stage.
+
+5. Verify the temporary staging field was removed
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X POST 'http://localhost:9200/work_items_v2/_count' -H 'Content-Type: application/json' -d '{"query":{"exists":{"field":"last_activity_at_stage"}}}'
+
+Actual output:
+
+{
+  "count": 0,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  }
+}
+
+Result: No documents have the temporary staging field.
+
+6. Verify the final timestamp field
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X POST 'http://localhost:9200/work_items_v2/_count' -H 'Content-Type: application/json' -d '{"query":{"exists":{"field":"last_activity_at"}}}'
+
+Actual output:
+
+{
+  "count": 500000,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  }
+}
+
+Result: Exactly 500,000 documents have last_activity_at.
+
+The other 300 documents have no activity timestamp. A previous PostgreSQL verification found zero items with IDs 500001–500300 that had related activity rows.
+
+7. Performance comparison
+
+Operation
+
+Documents
+
+Runtime
+
+Approx. throughput
+
+Original scan + bulk
+
+500,300
+
+77.30 s
+
+6,472 docs/s
+
+Staging scan + bulk
+
+500,300
+
+66.98 s
+
+7,470 docs/s
+
+Painless final update
+
+500,300
+
+24.614 s
+
+20,323 docs/s
+
+Throughput is calculated as documents divided by elapsed seconds. The Painless runtime is Elasticsearch's reported took value, so the figures are approximate and not a fully controlled benchmark.
+
+Original scan + bulk search-load measurements:
+
+Baseline before migration: p50 9.01 ms, p95 12.28 ms, max 88.97 ms across 100 requests.
+
+During original migration: 720 requests, 0 errors, p50 6.13 ms, p95 10.96 ms, max 217.99 ms.
+
+During staging: 628 requests, 0 errors, p50 5.39 ms, p95 9.54 ms, max 201.32 ms.
+
+8. ETA estimate versus actual runtime
+
+Initial ETA estimate: 50–160 minutes for the overall task, including investigation, implementation, verification, benchmarking, and documentation.
+
+Original migration execution: 77.30 seconds.
+
+Staging execution: 66.98 seconds.
+
+Painless final update: 24.614 seconds.
+
+The 77.30-second migration runtime is only the execution time, not the total time spent completing the entire task.
+
+9. Important implementation note
+
+This second approach is a hybrid PostgreSQL + scan/bulk + Painless workflow, not a standalone Painless-only migration. Painless cannot directly query PostgreSQL; the staging script first retrieves the timestamps and writes them into Elasticsearch, after which Painless performs the final field copy and cleanup.
+
+A previous Painless no-op benchmark processed 500,300 documents in approximately 8.897 seconds, but it did not migrate any data and must not be presented as a completed migration.
+

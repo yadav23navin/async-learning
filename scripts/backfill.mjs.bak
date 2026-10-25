@@ -1,0 +1,281 @@
+import es from "../src/elasticsearchClient.mjs";
+import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import readline from "node:readline/promises";
+import { stdin, stdout } from "node:process";
+
+const TARGET_INDEX = "work_items";
+const EXPECTED_CLUSTER = "docker-cluster";
+const MAX_RECORDS = 1000;
+const BATCH_SIZE = 100;
+const CHECKPOINT_DIR = ".backfill";
+const CHECKPOINT_FILE = path.join(CHECKPOINT_DIR, "points-zero.json");
+
+const args = new Set(process.argv.slice(2));
+const apply = args.has("--apply");
+const resume = args.has("--resume");
+const limitArg = process.argv.find((arg) => arg.startsWith("--limit="));
+const limit = limitArg ? Number(limitArg.split("=")[1]) : MAX_RECORDS;
+const stopArg = process.argv.find((arg) => arg.startsWith("--stop-after="));
+const stopAfter = stopArg ? Number(stopArg.split("=")[1]) : null;
+
+const query = {
+  bool: {
+    must_not: [{ exists: { field: "points" } }],
+  },
+};
+
+async function saveCheckpoint(checkpoint) {
+  await mkdir(CHECKPOINT_DIR, { recursive: true });
+  const tempFile = `${CHECKPOINT_FILE}.${process.pid}.tmp`;
+  await writeFile(tempFile, JSON.stringify(checkpoint, null, 2), {
+    mode: 0o600,
+  });
+  await rename(tempFile, CHECKPOINT_FILE);
+}
+
+async function loadCheckpoint() {
+  try {
+    return JSON.parse(await readFile(CHECKPOINT_FILE, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function confirmTarget(target) {
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  try {
+    const answer = await rl.question(
+      `Type APPLY ${target.cluster}/${target.index} to authorize writes: `,
+    );
+    return answer === `APPLY ${target.cluster}/${target.index}`;
+  } finally {
+    rl.close();
+  }
+}
+
+async function main() {
+  let pitId;
+  let completed = 0;
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+  let lastSort = null;
+  let checkpoint = null;
+  const jobId = randomUUID();
+  const startedAt = new Date().toISOString();
+
+  try {
+    const info = await es.info();
+    const target = {
+      cluster: info.cluster_name,
+      node: info.name,
+      version: info.version.number,
+      index: TARGET_INDEX,
+      mode: apply ? "APPLY" : "DRY RUN",
+      limit,
+      batchSize: BATCH_SIZE,
+    };
+
+    console.log("BACKFILL TARGET");
+    console.log(JSON.stringify(target, null, 2));
+
+    if (info.cluster_name !== EXPECTED_CLUSTER) {
+      throw new Error("Unexpected cluster; refusing to continue.");
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_RECORDS) {
+      throw new Error(`--limit must be an integer from 1 to ${MAX_RECORDS}.`);
+    }
+    if (stopAfter !== null &&
+        (!Number.isInteger(stopAfter) || stopAfter < 1 || stopAfter > limit)) {
+      throw new Error("--stop-after must be between 1 and --limit.");
+    }
+    if (resume && !apply) {
+      throw new Error("--resume requires --apply.");
+    }
+
+    const count = await es.count({ index: TARGET_INDEX, query });
+    console.log(`Documents missing points: ${count.count}`);
+    console.log(`Eligible for this run: ${Math.min(count.count, limit)}`);
+
+    if (!apply) {
+      const preview = await es.search({
+        index: TARGET_INDEX,
+        size: 5,
+        query,
+        sort: [{ "id.keyword": "asc" }, { _shard_doc: "asc" }],
+        _source: ["id", "title", "points"],
+      });
+      console.log("Sample documents (read-only):");
+      console.log(JSON.stringify(preview.hits.hits.map((hit) => ({
+        documentId: hit._id,
+        source: hit._source,
+      })), null, 2));
+      console.log("Dry run complete. No documents were changed.");
+      return;
+    }
+
+    if (!resume) {
+      checkpoint = {
+        version: 1,
+        jobId,
+        cluster: info.cluster_name,
+        index: TARGET_INDEX,
+        operation: "set-missing-points-to-zero",
+        limit,
+        batchSize: BATCH_SIZE,
+        completed: 0,
+        updated: 0,
+        lastSort: null,
+        startedAt,
+        updatedAt: startedAt,
+      };
+      await saveCheckpoint(checkpoint);
+    } else {
+      checkpoint = await loadCheckpoint();
+      if (!checkpoint) throw new Error("No checkpoint found to resume.");
+      if (
+        checkpoint.cluster !== info.cluster_name ||
+        checkpoint.index !== TARGET_INDEX ||
+        checkpoint.operation !== "set-missing-points-to-zero" ||
+        checkpoint.limit !== limit ||
+        checkpoint.batchSize !== BATCH_SIZE
+      ) {
+        throw new Error("Checkpoint target/settings mismatch; refusing to resume.");
+      }
+      completed = checkpoint.completed;
+      updated = checkpoint.updated;
+      lastSort = checkpoint.lastSort;
+      console.log(`Resuming job ${checkpoint.jobId} after ${completed} records.`);
+    }
+
+    if (completed >= limit) {
+      console.log("Checkpoint already reached the requested limit.");
+      return;
+    }
+
+    if (!(await confirmTarget(target))) {
+      console.log("Confirmation did not match. No writes performed.");
+      return;
+    }
+
+    const pit = await es.openPointInTime({
+      index: TARGET_INDEX,
+      keep_alive: "2m",
+    });
+    pitId = pit.id;
+
+    let interruptedAtBoundary = false;
+
+    while (completed < limit) {
+      const size = Math.min(BATCH_SIZE, limit - completed);
+      const response = await es.search({
+        size,
+        pit: { id: pitId, keep_alive: "2m" },
+        query,
+        sort: [{ "id.keyword": "asc" }, { _shard_doc: "asc" }],
+        ...(lastSort ? { search_after: lastSort } : {}),
+        _source: ["id", "title", "points"],
+      });
+
+      pitId = response.pit_id ?? pitId;
+      const hits = response.hits.hits;
+      if (hits.length === 0) break;
+
+      const operations = [];
+      for (const hit of hits) {
+        operations.push({ update: { _index: TARGET_INDEX, _id: hit._id } });
+        operations.push({
+          script: {
+            lang: "painless",
+            source: "if (ctx._source.points == null) { ctx._source.points = 0; } else { ctx.op = 'noop'; }",
+          },
+        });
+      }
+
+      const result = await es.bulk({
+        operations,
+        refresh: false,
+      });
+
+      if (result.errors) {
+        const errors = result.items.filter((item) => item.update?.error);
+        failed += errors.length;
+        throw new Error(`Bulk batch had ${errors.length} failed updates; checkpoint remains at the previous batch.`);
+      }
+
+      const batchUpdated = result.items.filter((item) =>
+        item.update?.result === "updated"
+      ).length;
+      const batchSkipped = result.items.filter((item) =>
+        item.update?.result === "noop"
+      ).length;
+
+      updated += batchUpdated;
+      skipped += batchSkipped;
+      completed += hits.length;
+      lastSort = hits[hits.length - 1].sort;
+
+      checkpoint = {
+        ...checkpoint,
+        completed,
+        updated,
+        lastSort,
+        updatedAt: new Date().toISOString(),
+      };
+      await saveCheckpoint(checkpoint);
+
+      console.log(JSON.stringify({
+        event: "backfill_batch_complete",
+        jobId: checkpoint.jobId,
+        cluster: info.cluster_name,
+        index: TARGET_INDEX,
+        completed,
+        limit,
+        updated: batchUpdated,
+        skipped: batchSkipped,
+        failed: 0,
+        lastDocumentId: hits[hits.length - 1]._id,
+      }));
+
+      if (stopAfter !== null && completed >= stopAfter) {
+        interruptedAtBoundary = true;
+        console.log(`Controlled stop after ${completed} records; checkpoint saved.`);
+        break;
+      }
+    }
+
+    console.log(JSON.stringify({
+      event: "backfill_summary",
+      jobId: checkpoint.jobId,
+      cluster: info.cluster_name,
+      index: TARGET_INDEX,
+      completed,
+      updated,
+      skipped,
+      failed,
+      limit,
+      resumed: resume,
+      checkpoint: CHECKPOINT_FILE,
+      interruptedAtBoundary,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    }, null, 2));
+  } finally {
+    if (pitId) {
+      try {
+        await es.closePointInTime({ id: pitId });
+      } catch {
+        console.error("Warning: could not close point-in-time search.");
+      }
+    }
+    await es.close();
+  }
+}
+
+main().catch((error) => {
+  console.error("Backfill failed:", error.message);
+  process.exitCode = 1;
+});

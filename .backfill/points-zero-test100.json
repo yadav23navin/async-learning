@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "jobId": "0bbd8b74-c871-42dd-8913-6bd36f5c5cf6",
+  "cluster": "docker-cluster",
+  "index": "work_items",
+  "operation": "set-missing-points-to-zero",
+  "limit": 100,
+  "batchSize": 100,
+  "completed": 100,
+  "updated": 100,
+  "skipped": 0,
+  "failed": 0,
+  "startedAt": "2026-10-24T06:06:01.842Z",
+  "updatedAt": "2026-10-24T06:06:26.540Z"
+}
