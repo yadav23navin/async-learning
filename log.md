@@ -180,3 +180,91 @@ These figures are approximate. The two runs perform different work, so their thr
 - [ ] A second independent migration that calculates latest activity timestamps using Painless alone is not feasible because the source activities are in PostgreSQL. The completed Painless run was a no-op benchmark, not a second migration.
 
 **Conclusion:** The actual timestamp migration and its verification are complete. The strict requirement for two independent migration approaches remains unfulfilled; do not report it as complete.
+
+============================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 26 — React Work-Item List: Deliberately Broken Fetch
+
+BUILD / SHIP
+
+Implemented
+
+Created a React work-item list using useState, useEffect, and browser fetch.
+
+Connected the frontend to the MiniTrack API through the Vite /api proxy.
+
+Added title filtering using the Elasticsearch search endpoint.
+
+Added loading and error states.
+
+Added a fetch counter to observe effect executions.
+
+Added temporary row-note inputs to demonstrate React list-key problems.
+
+Enabled React StrictMode in development.
+
+Intentional Bugs and Verification
+
+1. Out-of-order search responses
+
+Removed request cancellation and stale-response protection.
+
+Added artificial delays: queries of two characters or fewer wait 1,500 ms; longer queries wait 100 ms.
+
+Tested a slow pr query followed by a faster project query.
+
+The older request could finish later and overwrite the newer results.
+
+Demonstrated that asynchronous responses can arrive in a different order from the requests.
+
+2. Direct state mutation
+
+Mutated the first item's title directly using items[0].title = ....
+
+Called setItems(items) with the same array reference.
+
+The UI did not immediately update.
+
+Triggered another state update to force a render.
+
+Confirmed that the mutated title then appeared.
+
+3. StrictMode double fetch
+
+Reloaded the application with React StrictMode enabled.
+
+Observed two initial requests for /work-items?page=1&limit=20 in the browser Network tab.
+
+Both requests returned HTTP 304.
+
+Confirmed the additional effect execution during development.
+
+4. Index as list key
+
+Used key={index} when rendering work items.
+
+Added temporary note inputs to each row.
+
+Reversed the list using a new array while retaining index keys.
+
+Entered different notes into rows and reversed the list.
+
+Observed notes remaining in their previous positions instead of following their original work items.
+
+Demonstrated why array indexes are unsafe keys for reorderable lists.
+
+Result
+
+All four intentional React bugs were reproduced:
+
+Out-of-order responses can overwrite newer results.
+
+Direct state mutation can prevent the expected UI update.
+
+StrictMode performs an additional effect setup in development.
+
+Index keys can associate component-local input state with the wrong list item after reordering.
+
+The exercise demonstrates the limitations of manually managing server data with useState, useEffect, and fetch.
+
+The implementation intentionally remains buggy for learning purposes. Artificial delays and the forced-render test aid were introduced to make the failures observable.
