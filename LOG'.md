@@ -4564,3 +4564,262 @@ Observed result: One initial work-item listing request in the Network tab.
 Successfully reproduced the four original React problems and implemented fixes using TanStack Query, immutable cache updates, stable React keys, shared cache profiles, and distinct loading/error/empty UI states.
 
 Status: Build and Ship completed.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 27 — TanStack Query: The Cache Is the State
+
+BUILD / SHIP
+
+Refactored the MiniTrack work-item list to TanStack Query.
+
+# 1. Code implemented
+
+Configured QueryClientProvider in main.jsx.
+
+Created frontend/src/lib/workItemQueries.js.
+
+Created frontend/src/lib/queryProfiles.js.
+
+Created a query-key factory for work-item lists and searches.
+
+Included filters and pagination parameters in query keys.
+
+Used shared cache profiles instead of per-hook cache timing values.
+
+Added AbortSignal support to fetch functions.
+
+Implemented mutation handling using useMutation.
+
+Invalidated work-item queries after successful mutations.
+
+Added loading skeleton.
+
+Added error state with Retry button.
+
+Added empty state with a call to action.
+
+Used key={item.id} instead of array index for work-item rows.
+
+# 2. Terminal commands and outputs
+
+Command 1 — Production build
+
+npm --prefix frontend run build
+
+Observed output:
+
+65 modules transformed.
+Production build completed successfully.
+
+Command 2 — Frontend lint
+
+npm --prefix frontend run lint
+
+Observed result:
+
+Lint passed.
+No lint errors.
+
+Command 3 — Inspect query/filter implementation
+
+grep -nE 'workItemQueries.list|state|URLSearchParams|filters' frontend/src/App.jsx
+
+Observed relevant output:
+
+9:  state: '',
+23:  const [filters, setFilters] = useState(initialFilters)
+29:  const isSearching = Object.entries(filters).some(
+42:    () => ({ ...filters, q: filters.q.trim() }),
+47:    ...workItemQueries.list(listParams),
+123:            ['state', 'State'],
+134:                value={filters[name]}
+
+This confirmed that filter values are maintained in React state and passed into the query selection logic.
+
+Command 4 — Inspect query selection and parameters
+
+sed -n '25,52p' frontend/src/App.jsx
+
+Important code observed:
+
+const listParams = useMemo(
+  () => ({ page, limit, sort }),
+  [page, limit, sort],
+)
+
+const searchParams = useMemo(
+  () => ({ ...filters, q: filters.q.trim() }),
+  [filters],
+)
+
+const listQuery = useQuery({
+  ...workItemQueries.list(listParams),
+  enabled: !isSearching,
+})
+
+const searchQuery = useQuery({
+  ...workItemQueries.search(searchParams),
+  enabled: isSearching,
+})
+
+Explanation:
+
+List query identity includes page, limit and sort.
+
+Search query identity includes the filters, search text, size and cursor.
+
+Changing parameters creates a different query key.
+
+# 3. Four documented failures — browser tests
+
+Test 1: Stale list after mutation
+
+Action:
+
+Clicked Edit first item.
+
+Observed:
+
+The title updated automatically.
+
+(edited) appeared in the title.
+
+No manual browser refresh was required.
+
+Result: PASSED.
+
+Test 2: Search race condition
+
+Action:
+
+Searched for Daily.
+
+Immediately changed the search to Bug.
+
+Observed:
+
+Latest search results remained displayed.
+
+Older results did not overwrite the latest results.
+
+Result: PASSED.
+
+Test 3: StrictMode duplicate request lifecycle
+
+Action:
+
+Opened Chrome DevTools → Network.
+
+Reloaded the page.
+
+Observed:
+
+First request:  (canceled) — 6 ms
+Second request: 200 — 116 ms
+
+Explanation:
+
+React StrictMode exercises the mount and cleanup lifecycle in development.
+
+The first request was cancelled.
+
+The replacement request completed successfully.
+
+Result: PASSED.
+
+Test 4: Index key row-state corruption
+
+Action:
+
+Entered temporary notes in work-item rows.
+
+Clicked Reverse list.
+
+Observed:
+
+Notes remained attached to their original work items.
+
+Notes moved with their respective items rather than staying in their previous row positions.
+
+Result: PASSED.
+
+Explanation:
+
+Stable item IDs are used as React keys.
+
+React can correctly preserve row identity when the list is reordered.
+
+# 4. Query-key acceptance test
+
+Action:
+
+Changed State filter from blank to done.
+
+Watched Chrome DevTools → Network.
+
+Observed requests:
+
+search?state=d&size=20
+search?state=do&size=20
+search?state=don&size=20
+search?state=done&size=20
+
+Some requests returned HTTP 200 and the repeated final query returned HTTP 304.
+
+Explanation:
+
+Filter values are included in the search query parameters.
+
+Different filter combinations have different query identities.
+
+Returning to an earlier combination can reuse its cached response.
+
+Result: PASSED.
+
+# 5. Loading, error and empty UI tests
+
+Loading skeleton
+
+Action:
+
+Set Network throttling to 3G.
+
+Reloaded the page.
+
+Observed:
+
+Skeleton rows appeared while the request was loading.
+
+Result: PASSED.
+
+Error state
+
+Action:
+
+Set Network to Offline.
+
+Reloaded the page.
+
+Observed:
+
+Error message appeared.
+
+Retry button appeared.
+
+Result: PASSED.
+
+Empty state
+
+Action:
+
+Searched for xyznonexistent999.
+
+Observed:
+
+No work items found message appeared.
+
+Clear filters and start again CTA appeared.
+
+Result: PASSED.
+

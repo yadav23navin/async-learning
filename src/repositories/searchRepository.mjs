@@ -144,7 +144,7 @@ const createSearchRepository = () => {
                 }
             });
         }
-
+console.log("SEARCH QUERY RECEIVED:", JSON.stringify(query));
         const mustClauses = query.trim()
             ? [{
                 multi_match: {

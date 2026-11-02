@@ -268,3 +268,74 @@ Index keys can associate component-local input state with the wrong list item af
 The exercise demonstrates the limitations of manually managing server data with useState, useEffect, and fetch.
 
 The implementation intentionally remains buggy for learning purposes. Artificial delays and the forced-render test aid were introduced to make the failures observable.
+
+============================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+## Day 27 — TanStack Query: the cache is the state
+
+### Implemented
+- Refactored the MiniTrack work-item list to TanStack Query.
+- Configured QueryClientProvider.
+- Created a query-key factory for list and search queries.
+- Added shared cache profiles.
+- Added AbortSignal support to query functions.
+- Added mutation handling with query-cache invalidation.
+- Added loading skeleton, error state with retry, and empty state with CTA.
+- Used stable work-item IDs as React row keys.
+
+### Four failure tests — all passed
+
+1. **Stale data after mutation**
+   - Edited the first work item.
+   - Updated title appeared automatically with `(edited)`.
+   - No manual browser refresh required.
+
+2. **Search race condition**
+   - Searched for `Daily`, then immediately searched for `Bug`.
+   - Latest search results remained displayed.
+   - Older results did not overwrite them.
+
+3. **StrictMode duplicate request lifecycle**
+   - Reloaded the page with Network tab open.
+   - First request was cancelled.
+   - Second request completed with HTTP 200.
+   - Confirmed cancellation and cleanup behaviour.
+
+4. **Index key row-state corruption**
+   - Entered temporary notes in work-item rows.
+   - Reversed the list.
+   - Notes stayed with their original work items.
+   - Confirmed stable ID keys prevent row-state corruption.
+
+### Build checks
+- Frontend production build passed.
+- Frontend lint passed.
+- Work-item list rendered successfully.
+- Update mutation success observed.
+
+### Final acceptance tests — 2 November 2026
+
+5. **Query-key identity**
+   - Changed State filter from blank to `done`.
+   - Network showed distinct search requests as the filter value changed.
+   - Confirmed filter-specific query keys and cached responses.
+
+6. **Loading state**
+   - Enabled 3G network throttling and reloaded.
+   - Loading skeleton appeared before results.
+
+7. **Error state**
+   - Switched browser Network to Offline and reloaded.
+   - Error message and Retry button appeared.
+   - Restored network afterwards.
+
+8. **Empty state**
+   - Searched for `xyznonexistent999`.
+   - Empty-state message and CTA appeared.
+
+### Final acceptance
+- All four documented failure fixes tested successfully.
+- Query keys include filter and pagination parameters.
+- Cache timing comes from shared query profiles.
+- Loading, error, and empty states demonstrated.
+- Frontend build and lint passed.

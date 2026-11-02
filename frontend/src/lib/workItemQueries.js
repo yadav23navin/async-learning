@@ -1,7 +1,7 @@
 import { queryProfiles } from './queryProfiles'
 
-async function fetchApi(url) {
-  const response = await fetch(url)
+async function fetchApi(url, signal) {
+  const response = await fetch(url, { signal })
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`)
@@ -12,30 +12,32 @@ async function fetchApi(url) {
 
 export const workItemKeys = {
   all: ['work-items'],
-  list: (params) => ['work-items', 'list', params],
-  search: (params) => ['work-items', 'search', params],
+  lists: () => [...workItemKeys.all, 'list'],
+  list: (params) => [...workItemKeys.lists(), params],
+  searches: () => [...workItemKeys.all, 'search'],
+  search: (params) => [...workItemKeys.searches(), params],
 }
 
 export const workItemQueries = {
   list: (params) => ({
     queryKey: workItemKeys.list(params),
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const searchParams = new URLSearchParams(params)
-      return fetchApi(`/api/work-items?${searchParams}`)
+      return fetchApi(`/api/work-items?${searchParams}`, signal)
     },
-    ...queryProfiles.workItems,
+    ...queryProfiles.live,
   }),
 
   search: (params) => ({
     queryKey: workItemKeys.search(params),
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const searchParams = new URLSearchParams(
         Object.entries(params).filter(
           ([, value]) => value !== undefined && value !== null && value !== '',
         ),
       )
 
-      return fetchApi(`/api/search?${searchParams}`)
+      return fetchApi(`/api/search?${searchParams}`, signal)
     },
     ...queryProfiles.search,
   }),
