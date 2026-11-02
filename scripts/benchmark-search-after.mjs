@@ -15,14 +15,11 @@ async function fetchPage(cursor = null) {
     }
 
     const start = performance.now();
-
     const response = await fetch(url);
     const elapsedMs = performance.now() - start;
-
     if (!response.ok) {
         throw new Error(`Search failed: HTTP ${response.status}`);
     }
-
     const body = await response.json();
 
     if (!body.success) {

@@ -1,7 +1,7 @@
 import esClient from "../elasticsearchClient.mjs";
 import { getOrSetCache } from "../cache.mjs";
 
-const INDEX = "work_items_v2";
+const INDEX = "work_items_current";
 
 const createSearchRepository = () => {
     const getProjectStates = async () =>
@@ -11,7 +11,7 @@ const createSearchRepository = () => {
                 size: 0,
                 aggs: {
                     states: {
-                        terms: { field: "state", size: 20 }
+                        terms: { field: "status", size: 20 }
                     }
                 }
             });
@@ -59,7 +59,7 @@ const createSearchRepository = () => {
                     },
                     aggs: {
                         members: {
-                            terms: { field: "assignee_id", size: 100 }
+                            terms: { field: "assignee_id.keyword", size: 100 }
                         }
                     }
                 });
@@ -77,10 +77,10 @@ const createSearchRepository = () => {
                 index: INDEX,
                 size: 0,
                 aggs: {
-                    states: { terms: { field: "state", size: 20 } },
-                    priorities: { terms: { field: "priority", size: 20 } },
-                    projects: { terms: { field: "project_id", size: 100 } },
-                    assignees: { terms: { field: "assignee_id", size: 100 } }
+                    states: { terms: { field: "status", size: 20 } },
+                    priorities: { terms: { field: "priority.keyword", size: 20 } },
+                    projects: { terms: { field: "project_id.keyword", size: 100 } },
+                    assignees: { terms: { field: "assignee_id.keyword", size: 100 } }
                 }
             });
 
@@ -111,7 +111,7 @@ const createSearchRepository = () => {
         const filterClauses = [];
 
         if (filters.state) {
-            filterClauses.push({ term: { state: filters.state } });
+            filterClauses.push({ term: { status: filters.state } });
         }
         if (filters.assignee_id) {
             filterClauses.push({
@@ -124,7 +124,7 @@ const createSearchRepository = () => {
             });
         }
         if (filters.priority) {
-            filterClauses.push({ term: { priority: filters.priority } });
+            filterClauses.push({ term: { "priority.keyword": filters.priority } });
         }
 
         if (filters.created_from || filters.created_to) {
@@ -144,7 +144,7 @@ const createSearchRepository = () => {
                 }
             });
         }
-
+console.log("SEARCH QUERY RECEIVED:", JSON.stringify(query));
         const mustClauses = query.trim()
             ? [{
                 multi_match: {
@@ -161,10 +161,10 @@ const createSearchRepository = () => {
                 size,
                 track_total_hits: true,
                 _source: [
-                    "work_item_id",
+                    "id",
                     "title",
                     "description",
-                    "state",
+                    "status",
                     "assignee_id",
                     "project_id",
                     "priority",
@@ -178,7 +178,7 @@ const createSearchRepository = () => {
                 },
                 sort: [
                     { created_at: "asc" },
-                    { work_item_id: "asc" }
+                    { "id.keyword": "asc" }
                 ],
                 ...(searchAfter ? { search_after: searchAfter } : {})
             })

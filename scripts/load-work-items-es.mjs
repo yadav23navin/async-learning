@@ -57,7 +57,7 @@ const loadWorkItems = async () => {
             for (const workItem of result.rows) {
                 operations.push({
                     index: {
-                        _index: "work_items",
+                        _index: "work_items_v2",
                         _id: workItem.id
                     }
                 });

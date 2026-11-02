@@ -3177,3 +3177,1649 @@ Final Result
 The daily digest job is implemented. Dry-run behavior, manual email delivery, concurrent-run locking, timezone conversion, and scheduled completion-marker skipping were verified.
 
 A real scheduled execution at 09:00 IST on a live clock has not yet been observed.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 23 — Resumable Elasticsearch Backfill
+
+BUILD / SHIP
+
+1. Create a backup of the original script
+
+Command
+
+cp scripts/backfill.mjs scripts/backfill.mjs.bak
+
+Result
+
+Created a backup of the original backfill script at scripts/backfill.mjs.bak.
+
+2. Check JavaScript syntax
+
+Command
+
+node --check scripts/backfill.mjs
+
+Result
+
+No output.
+
+Syntax check passed.
+
+3. Run the dry-run preview
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000
+
+Observed output
+
+Cluster: docker-cluster
+Index: work_items
+Mode: DRY RUN
+Limit: 1000
+Batch size: 100
+Documents missing points: 500300
+Eligible for this run: 1000
+
+Five sample documents were previewed.
+
+No documents were modified during the dry run.
+
+4. Test a small backfill of 100 documents
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=100 --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Result
+
+Updated: 100
+Failures: 0
+
+Checkpoint created at .backfill/points-zero.json.
+
+5. Checkpoint protection when changing the run limit
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --apply
+
+Result
+
+The script refused to start because an existing checkpoint was present.
+
+The checkpoint needed to be moved before starting a separate job with a different limit.
+
+6. Move the earlier checkpoint aside
+
+Command
+
+mv .backfill/points-zero.json .backfill/points-zero-test100.json
+
+Result
+
+Preserved the checkpoint from the 100-document test under a different filename.
+
+7. Test stopping after 400 documents
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --stop-after=400 --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Observed result
+
+Job ID: cab00433-b4ac-436e-9dcf-798525670bef
+Updated: 400
+Skipped: 0
+Failures: 0
+Stopped: true
+Checkpoint saved
+
+The script stopped at the configured batch boundary.
+
+Progress was saved in .backfill/points-zero.json.
+
+8. Resume the first controlled-stop job
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Result
+
+Resumed from the saved checkpoint.
+
+Continued from 400 toward the 1,000-document limit.
+
+Completed 1,000 updates in total.
+
+Zero skipped and zero failed updates.
+
+9. Move completed checkpoints aside before separate jobs
+
+These checkpoint moves were performed to allow new independent runs without overwriting or reusing the previous completed job's checkpoint.
+
+Commands
+
+mv .backfill/points-zero.json .backfill/points-zero-completed1000.json
+
+mv .backfill/points-zero.json .backfill/points-zero-completed1000b.json
+
+mv .backfill/points-zero.json .backfill/points-zero-completed1000c.json
+
+Result
+
+Preserved the completed checkpoints under separate filenames.
+
+10. Additional 1,000-document apply runs
+
+The following command was run for separate 1,000-document jobs:
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --apply
+
+Confirmation entered each time
+
+APPLY docker-cluster/work_items
+
+Observed results
+
+Job d0dba942-4d46-4234-a324-d48d02f348f7: completed 1,000 updates, zero failures.
+
+Job e21c381e-af85-402a-84f5-5290482e3412: completed 1,000 updates, zero failures.
+
+The script completed too quickly for the attempted manual Ctrl+C interruption tests.
+
+11. Check an already completed checkpoint
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Result
+
+The script recognized that the corresponding job had already reached 1,000 updates.
+
+No additional updates were needed for that completed job.
+
+12. Repeat the controlled stop/resume test
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --stop-after=400 --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Observed output
+
+Job ID: c2c354cf-5ff6-4ec7-8763-0bfdfb030778
+Updated: 400
+Skipped: 0
+Failures: 0
+Stopped: true
+Checkpoint saved
+
+13. Resume the same job
+
+Command
+
+ES_PASSWORD='ePS5j28X' node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Confirmation entered
+
+APPLY docker-cluster/work_items
+
+Observed result
+
+Same job ID: c2c354cf-5ff6-4ec7-8763-0bfdfb030778
+Previously completed: 400
+Resumed through: 500
+Resumed through: 600
+Resumed through: 700
+Resumed through: 800
+Resumed through: 900
+Resumed through: 1000
+Total updated: 1000
+Skipped: 0
+Failures: 0
+Stopped: false
+
+The same job ID was retained.
+
+The checkpoint allowed the job to continue from 400 rather than starting a new job.
+
+The controlled stop/resume test passed.
+
+14. Verify the Elasticsearch document counts
+
+Command
+
+ES_PASSWORD='ePS5j28X' node --input-type=module -e 'import es from "./src/elasticsearchClient.mjs"; try { console.log(JSON.stringify({missingPoints:(await es.count({index:"work_items",query:{bool:{must_not:[{exists:{field:"points"}}]}}})).count,zeroPoints:(await es.count({index:"work_items",query:{term:{points:0}}})).count},null,2)); } finally { await es.close(); }'
+
+Observed output from the earlier verification
+
+{
+  "missingPoints": 499200,
+  "zeroPoints": 1100
+}
+
+Interpretation:
+
+missingPoints counts documents that still do not have a points field.
+
+zeroPoints counts documents whose points value is 0.
+
+This verification was performed after the initial 100-document test and the first 1,000-document job.
+
+The last controlled stop/resume run started when the missing count was observed at 495800 and updated another 1,000 documents. The expected missing count afterward is 494800; a fresh verification after that final run was not recorded in the available output.
+
+15. Update the project log
+
+Command
+
+cat >> log.md <<'EOF'
+
+# Day 23 — Resumable Elasticsearch Backfill
+
+## BUILD / SHIP
+
+### Implemented
+- Created reusable `scripts/backfill.mjs`.
+- Added dry-run preview and explicit confirmation before writes.
+- Added target-cluster validation for `docker-cluster`.
+- Added batches of 100 documents.
+- Added checkpoint persistence in `.backfill/points-zero.json`.
+- Added `--limit`, `--apply`, `--resume`, and `--stop-after` options.
+- Updated missing `points` values to `0` in the `work_items` index.
+
+### Tests
+- `node --check scripts/backfill.mjs`: passed.
+- Dry run: found 500,300 documents missing `points`; previewed five sample documents without modifying data.
+- 100-document test: 100 updated, zero failures.
+- Additional 1,000-document jobs: completed with zero failures.
+- Controlled stop: stopped at 400 updates and saved a checkpoint.
+- Resume: continued the same job from 400 to 1,000 updates, with zero skipped and zero failed updates.
+- Elasticsearch count verification observed 499,200 missing `points` and 1,100 documents with `points: 0` after the initial test and first 1,000-document job.
+
+### Notes
+- Multiple independent 1,000-document jobs were run during testing.
+- The controlled stop/resume workflow passed.
+- An actual Ctrl+C/process-kill interruption was not demonstrated.
+- The entire index has not been backfilled; remaining documents still need processing if a full-index backfill is required.
+
+### Additional Tests — Final Completion
+
+#### 16. Test actual Ctrl+C interruption
+
+Command
+
+printf 'APPLY docker-cluster/work_items\n' | timeout --signal=INT --kill-after=5s 5s env ES_PASSWORD='ePS5j28X' BACKFILL_CHECKPOINT=.backfill/points-zero-sigint-test.json BACKFILL_DELAY_MS=1000 node scripts/backfill.mjs --limit=1000 --apply
+
+Observed result
+
+- Job ID: cb82c022-5610-4b0c-a631-a57017e24218
+- Updated before interruption: 300
+- Skipped: 0
+- Failures: 0
+- Ctrl+C was received.
+- The script stopped safely after the current batch.
+- Checkpoint was saved to `.backfill/points-zero-sigint-test.json`.
+
+Result: Passed. The interruption handler safely stopped the job and preserved its progress.
+
+#### 17. Resume after actual Ctrl+C
+
+Command
+
+printf 'APPLY docker-cluster/work_items\n' | env ES_PASSWORD='ePS5j28X' BACKFILL_CHECKPOINT=.backfill/points-zero-sigint-test.json node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Observed result
+
+- Same job ID: cb82c022-5610-4b0c-a631-a57017e24218
+- Previously completed: 300 updates
+- Resumed from 300 and continued through 400, 500, 600, 700, 800, 900, and 1,000.
+- Total updated: 1,000
+- Skipped: 0
+- Failures: 0
+- Stopped: false
+
+Result: Passed. The job resumed from its saved checkpoint rather than restarting from zero.
+
+#### 18. Verify completed-checkpoint behavior
+
+Command
+
+printf 'APPLY docker-cluster/work_items\n' | env ES_PASSWORD='ePS5j28X' BACKFILL_CHECKPOINT=.backfill/points-zero-sigint-test.json node scripts/backfill.mjs --limit=1000 --resume --apply
+
+Observed output
+
+Resuming job cb82c022-5610-4b0c-a631-a57017e24218; successful updates so far: 1000.
+Requested update limit already reached.
+
+Result: Passed. The completed job performed no additional updates.
+
+Note: This verifies completed-checkpoint behavior, not a fresh independent rerun. A fresh job can process other documents that still lack `points`.
+
+#### 19. Final verification status
+
+- Dry-run safety: passed.
+- Explicit write confirmation and target-cluster validation: passed.
+- Batch processing and checkpoint persistence: passed.
+- Controlled stop/resume using `--stop-after=400`: passed.
+- Actual Ctrl+C interruption and resume: passed.
+- Completed-checkpoint no-op: passed.
+- The latest recorded pre-run count was 492,900 documents missing `points`. The subsequent resumed job updated 700 documents, so the expected missing count afterward is 492,200.
+- A fresh Elasticsearch count query after the final run was not recorded.
+- The full index has not been backfilled; this task intentionally used bounded test runs.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 25 — Elasticsearch Activity Timestamp Migration
+
+BUILD / SHIP
+
+1. Check the migration script syntax
+
+Command
+
+node --check scripts/backfill-last-activity.mjs
+
+Output
+
+No output — syntax check passed.
+
+What it means: Node checked the JavaScript syntax without executing the migration or changing Elasticsearch data.
+
+2. First migration attempt — authentication failure
+
+Command
+
+node scripts/backfill-last-activity.mjs
+
+Output
+
+Migration failed: ResponseError: security_exception
+security_exception: missing authentication credentials for REST request [/]
+status: 401
+
+What happened: Elasticsearch requires authentication. The script's Elasticsearch client reads the password from ES_PASSWORD, which was not set in that terminal.
+
+3. Run the migration with authentication
+
+Command
+
+ES_PASSWORD='<your-local-ES-password>' node scripts/backfill-last-activity.mjs
+
+Observed output
+
+Processed 500000; updated 500000
+
+=== Scan + bulk summary ===
+{
+  "beforeCount": 500300,
+  "afterCount": 500300,
+  "processed": 500300,
+  "updated": 500300,
+  "elapsedSeconds": 77.3,
+  "searchLoad": {
+    "requests": 720,
+    "errors": 0,
+    "p50_ms": 6.13,
+    "p95_ms": 10.96,
+    "max_ms": 217.99
+  }
+}
+
+What it means:
+
+beforeCount and afterCount are equal, so the migration did not change the number of documents.
+
+All 500,300 documents were processed and updated.
+
+The migration took 77.3 seconds.
+
+The search load generator ran alongside the migration.
+
+All 720 search requests succeeded.
+
+Search p95 latency during the migration was 10.96 ms.
+
+How the scan + bulk approach works:
+
+Read a batch of documents from Elasticsearch.
+
+Collect their work_item_id values.
+
+Query PostgreSQL for each work item's latest activity using MAX(created_at).
+
+Build bulk update operations.
+
+Write last_activity_at to Elasticsearch.
+
+Continue until all documents are processed.
+
+The new field stores the latest related activity timestamp. Items without activities receive null.
+
+4. Verify the new field is populated
+
+Command
+
+curl -s -u 'elastic:<your-local-ES-password>' \
+  -X POST 'http://localhost:9200/work_items_v2/_count' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"exists":{"field":"last_activity_at"}}}'
+
+Output
+
+{
+  "count": 500000,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  }
+}
+
+What it means: 500,000 documents have a non-null last_activity_at. Elasticsearch's exists query does not count fields whose value is null.
+
+5. Find documents with a missing timestamp
+
+Command
+
+curl -s -u 'elastic:<your-local-ES-password>' \
+  -X POST 'http://localhost:9200/work_items_v2/_search' \
+  -H 'Content-Type: application/json' \
+  -d '{"size":5,"query":{"bool":{"must_not":[{"exists":{"field":"last_activity_at"}}]}},"_source":["work_item_id","last_activity_at"]}'
+
+Observed output — relevant fields
+
+{
+  "hits": {
+    "total": {
+      "value": 300,
+      "relation": "eq"
+    },
+    "hits": [
+      {
+        "_id": "500001",
+        "_source": {
+          "work_item_id": "500001",
+          "last_activity_at": null
+        }
+      }
+    ]
+  }
+}
+
+What it means: 300 documents have a null timestamp. The response showed these fields for the sample document. The complete response contained five sample hits.
+
+6. Verify those 300 items in PostgreSQL
+
+First attempt
+
+PGPASSWORD='<your-PostgreSQL-password>' psql -h localhost -U minitrack -d minitrack -c "SELECT COUNT(DISTINCT w.work_item_id) AS missing_items_with_activities FROM work_items w JOIN activities a ON a.work_item_id = w.work_item_id WHERE w.work_item_id BETWEEN 500001 AND 500300;"
+
+Output
+
+ERROR: column w.work_item_id does not exist
+HINT: Perhaps you meant to reference the column "a.work_item_id".
+
+What happened: The PostgreSQL work_items table uses id as its primary key, not work_item_id.
+
+Corrected command
+
+PGPASSWORD='<your-PostgreSQL-password>' psql -h localhost -U minitrack -d minitrack -c "SELECT COUNT(DISTINCT w.id) AS missing_items_with_activities FROM work_items w JOIN activities a ON a.work_item_id = w.id WHERE w.id BETWEEN 500001 AND 500300;"
+
+Output
+
+ missing_items_with_activities
+--------------------------------
+                              0
+(1 row)
+
+What it means: None of the 300 work items in the checked ID range has a matching activity row. Their null timestamps are expected.
+
+Final field-population summary
+
+Total documents: 500,300
+
+Documents with a timestamp: 500,000
+
+Documents without a timestamp: 300
+
+Verified missing items with activities: 0
+
+7. Benchmark Elasticsearch update_by_query with Painless
+
+Command
+
+time curl -s -u 'elastic:<your-local-ES-password>' \
+  -X POST 'http://localhost:9200/work_items_v2/_update_by_query?refresh=true&conflicts=proceed' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"script":{"lang":"painless","source":"ctx.op = \"noop\""}}'
+
+Observed output
+
+{
+  "took": 8831,
+  "timed_out": false,
+  "total": 500300,
+  "updated": 0,
+  "deleted": 0,
+  "batches": 501,
+  "version_conflicts": 0,
+  "noops": 500300,
+  "retries": {
+    "bulk": 0,
+    "search": 0
+  },
+  "throttled_millis": 0,
+  "requests_per_second": -1.0,
+  "throttled_until_millis": 0,
+  "failures": []
+}
+
+Shell timing
+
+real    0m8.897s
+user    0m0.012s
+sys     0m0.006s
+
+What it means:
+
+Elasticsearch scanned 500,300 documents.
+
+The Painless script set ctx.op = "noop", telling Elasticsearch not to modify the document.
+
+All 500,300 documents were no-ops.
+
+The operation took about 8.9 seconds.
+
+There were no version conflicts or reported failures.
+
+Important limitation: Painless cannot query the PostgreSQL activities table. This benchmark measures Elasticsearch-side scanning and script execution only. It does not calculate or populate the latest activity timestamp, so it is not equivalent to the scan + bulk migration.
+
+8. Search latency comparison
+
+The baseline was measured before the migration.
+
+Metric
+
+Baseline
+
+During scan + bulk
+
+p50
+
+Not recorded in the available baseline results
+
+6.13 ms
+
+p95
+
+12.28 ms
+
+10.96 ms
+
+Maximum
+
+88.97 ms
+
+217.99 ms
+
+Search errors
+
+Not recorded in the available baseline results
+
+0
+
+Interpretation:
+
+Baseline p95 was 12.28 ms.
+
+During the migration, p95 was 10.96 ms.
+
+The observed p95 decreased by 1.32 ms in this run.
+
+The maximum request latency reached 217.99 ms, so occasional slower requests still occurred.
+
+Search latency was not measured during the Painless no-op benchmark.
+
+This result applies to the measured run only; it does not guarantee that every workload will behave the same way.
+
+9. Migration plan and estimated versus actual time
+
+Initial estimated total time: 50–160 minutes.
+
+Planned steps:
+
+Inspect the mapping, PostgreSQL activity relationship, and search endpoint.
+
+Add the last_activity_at mapping.
+
+Implement scan + bulk migration.
+
+Benchmark Painless update_by_query where applicable.
+
+Verify document count and timestamp population.
+
+Measure search latency during the migration.
+
+Record the results.
+
+Actual scan + bulk execution time: 77.3 seconds, or approximately 1 minute 17 seconds.
+
+The scan + bulk execution was substantially faster than the initial estimate. The 77.3-second figure is the measured migration runtime, not the total time spent planning, troubleshooting, and documenting.
+
+# Day 24 — Elasticsearch Activity Timestamp Migration (Final Results)
+
+1. Add the temporary staging field mapping
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X PUT 'http://localhost:9200/work_items_v2/_mapping' -H 'Content-Type: application/json' -d '{"properties":{"last_activity_at_stage":{"type":"date","format":"epoch_millis"}}}'
+
+Expected successful response:
+
+{"acknowledged":true}
+
+Note: An initial attempt returned HTTP 401 because the password placeholder was used literally. The corrected command was then used.
+
+2. Create the staging script
+
+Command:
+
+cp scripts/backfill-last-activity.mjs scripts/stage-last-activity.mjs
+
+Change the output field in the copied script:
+
+sed -i 's/last_activity_at:/last_activity_at_stage:/g' scripts/stage-last-activity.mjs
+
+The original migration script remains unchanged.
+
+3. Run the staging scan + bulk operation
+
+Command:
+
+ES_PASSWORD='ePS5j28X' node scripts/stage-last-activity.mjs
+
+Actual output:
+
+Processed 500000; updated 500000
+
+=== Scan + bulk summary ===
+{
+  "beforeCount": 500300,
+  "afterCount": 500300,
+  "processed": 500300,
+  "updated": 500300,
+  "elapsedSeconds": 66.98,
+  "searchLoad": {
+    "requests": 628,
+    "errors": 0,
+    "p50_ms": 5.39,
+    "p95_ms": 9.54,
+    "max_ms": 201.32
+  }
+}
+
+Results:
+
+Processed: 500,300 documents
+
+Updated: 500,300 documents
+
+Runtime: 66.98 seconds
+
+Search requests: 628
+
+Search errors: 0
+
+Search p95 latency: 9.54 ms
+
+4. Copy staged timestamps using Painless
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X POST 'http://localhost:9200/work_items_v2/_update_by_query?refresh=true&conflicts=proceed' -H 'Content-Type: application/json' -d '{"query":{"match_all":{}},"script":{"lang":"painless","source":"if (ctx._source.containsKey(\"last_activity_at_stage\")) { ctx._source.last_activity_at = ctx._source.last_activity_at_stage; ctx._source.remove(\"last_activity_at_stage\"); } else { ctx.op = \"noop\"; }"}}'
+
+Actual output:
+
+{
+  "took": 24614,
+  "timed_out": false,
+  "total": 500300,
+  "updated": 500300,
+  "deleted": 0,
+  "batches": 501,
+  "version_conflicts": 0,
+  "noops": 0,
+  "retries": {
+    "bulk": 0,
+    "search": 0
+  },
+  "throttled_millis": 0,
+  "requests_per_second": -1.0,
+  "failures": []
+}
+
+Results:
+
+Documents updated: 500,300
+
+Elasticsearch-reported runtime: 24.614 seconds
+
+Version conflicts: 0
+
+No-ops: 0
+
+Failures: 0
+
+The script copied the staged values into last_activity_at and removed last_activity_at_stage.
+
+5. Verify the temporary staging field was removed
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X POST 'http://localhost:9200/work_items_v2/_count' -H 'Content-Type: application/json' -d '{"query":{"exists":{"field":"last_activity_at_stage"}}}'
+
+Actual output:
+
+{
+  "count": 0,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  }
+}
+
+Result: No documents have the temporary staging field.
+
+6. Verify the final timestamp field
+
+Command:
+
+curl -s -u 'elastic:ePS5j28X' -X POST 'http://localhost:9200/work_items_v2/_count' -H 'Content-Type: application/json' -d '{"query":{"exists":{"field":"last_activity_at"}}}'
+
+Actual output:
+
+{
+  "count": 500000,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  }
+}
+
+Result: Exactly 500,000 documents have last_activity_at.
+
+The other 300 documents have no activity timestamp. A previous PostgreSQL verification found zero items with IDs 500001–500300 that had related activity rows.
+
+7. Performance comparison
+
+Operation
+
+Documents
+
+Runtime
+
+Approx. throughput
+
+Original scan + bulk
+
+500,300
+
+77.30 s
+
+6,472 docs/s
+
+Staging scan + bulk
+
+500,300
+
+66.98 s
+
+7,470 docs/s
+
+Painless final update
+
+500,300
+
+24.614 s
+
+20,323 docs/s
+
+Throughput is calculated as documents divided by elapsed seconds. The Painless runtime is Elasticsearch's reported took value, so the figures are approximate and not a fully controlled benchmark.
+
+Original scan + bulk search-load measurements:
+
+Baseline before migration: p50 9.01 ms, p95 12.28 ms, max 88.97 ms across 100 requests.
+
+During original migration: 720 requests, 0 errors, p50 6.13 ms, p95 10.96 ms, max 217.99 ms.
+
+During staging: 628 requests, 0 errors, p50 5.39 ms, p95 9.54 ms, max 201.32 ms.
+
+8. ETA estimate versus actual runtime
+
+Initial ETA estimate: 50–160 minutes for the overall task, including investigation, implementation, verification, benchmarking, and documentation.
+
+Original migration execution: 77.30 seconds.
+
+Staging execution: 66.98 seconds.
+
+Painless final update: 24.614 seconds.
+
+The 77.30-second migration runtime is only the execution time, not the total time spent completing the entire task.
+
+9. Important implementation note
+
+This second approach is a hybrid PostgreSQL + scan/bulk + Painless workflow, not a standalone Painless-only migration. Painless cannot directly query PostgreSQL; the staging script first retrieves the timestamps and writes them into Elasticsearch, after which Painless performs the final field copy and cleanup.
+
+A previous Painless no-op benchmark processed 500,300 documents in approximately 8.897 seconds, but it did not migrate any data and must not be presented as a completed migration.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+Day 25 — Zero-Downtime Elasticsearch Reindex & Rollback
+
+Goal
+
+Change an Elasticsearch mapping that cannot be changed in place, reindex the data into a new index, switch an alias atomically, and roll back without failed search requests.
+
+Environment
+
+Elasticsearch: http://localhost:9200
+
+Source index: work_items_v2
+
+Target index: work_items_v3
+
+Search alias: work_items_current
+
+API search endpoint: http://localhost:3000/search?q=test
+
+Credentials used in commands: elastic:ePS5j28X
+
+1. Create the v3 index
+
+Created work_items_v3 with the updated mapping. The created_at field accepts standard date strings and epoch milliseconds.
+
+Mapping format:
+
+"created_at": {
+  "type": "date",
+  "format": "strict_date_optional_time||epoch_millis"
+}
+
+Result: Index creation acknowledged.
+
+Note: The complete original PUT /work_items_v3 request body is not available in the retained command history, so this records the mapping change without reconstructing an unverified full command.
+
+2. Run the initial asynchronous sliced reindex
+
+The reindex copied documents from work_items_v2 into work_items_v3. It ran asynchronously and used slicing to divide the work.
+
+Task ID:
+
+Yc1LpK2fROioJZOCCvaHFw:558401
+
+Check the task
+
+curl -s -u 'elastic:ePS5j28X' \
+'http://localhost:9200/_tasks/Yc1LpK2fROioJZOCCvaHFw:558401'
+
+Recorded result:
+
+Completed: true
+
+Documents created: 500302
+
+Version conflicts: 0
+
+Failures: []
+
+What this means: The initial reindex copied 500,302 documents without reported version conflicts or reindex failures.
+
+3. Run the catch-up pass
+
+A second reindex pass was run to catch up on the source data. This was a full repeat pass, not a filtered incremental pass.
+
+Task ID:
+
+Yc1LpK2fROioJZOCCvaHFw:576686
+
+Check the catch-up task
+
+curl -s -u 'elastic:ePS5j28X' \
+'http://localhost:9200/_tasks/Yc1LpK2fROioJZOCCvaHFw:576686'
+
+Actual result:
+
+completed: true
+total: 500302
+updated: 500302
+batches: 501
+version_conflicts: 0
+failures: []
+
+What this means: The second pass updated 500,302 existing documents in the target index. No version conflicts or failures were reported.
+
+4. Verify document counts
+
+Check both indexes together
+
+curl -s -u 'elastic:ePS5j28X' \
+'http://localhost:9200/work_items_v2,work_items_v3/_count?pretty'
+
+The combined count was:
+
+count: 1000604
+_shards.successful: 2
+
+Check each index separately
+
+curl -s -u 'elastic:ePS5j28X' \
+'http://localhost:9200/work_items_v2/_count?pretty'
+
+Expected and observed count:
+
+count: 500302
+
+curl -s -u 'elastic:ePS5j28X' \
+'http://localhost:9200/work_items_v3/_count?pretty'
+
+Expected and observed count:
+
+count: 500302
+
+Verification: Both indexes contained 500,302 documents.
+
+5. Verify the API search endpoint
+
+The API was started with the Elasticsearch password configured:
+
+ES_PASSWORD='ePS5j28X' npm run dev
+
+The search endpoint was checked after fixing the search repository's field/alias references and restarting the API.
+
+curl -s -o /tmp/day25-search.json \
+-w 'HTTP %{http_code}\n' \
+'http://localhost:3000/search?q=test'
+
+Actual output:
+
+HTTP 200
+
+What this means: The search endpoint returned HTTP 200 before the load test and alias operations.
+
+6. Run the load generator
+
+The load generator sent 1,200 search requests, with a short pause between requests, and recorded each request's timestamp and HTTP status.
+
+: > /tmp/day25-load.log
+(for i in $(seq 1 1200); do
+  code=$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' \
+  'http://localhost:3000/search?q=test')
+  printf '%s %s\n' "$(date +%s%3N)" "$code" >> /tmp/day25-load.log
+  sleep 0.1
+done) & echo "Load generator PID: $!"
+
+The load generator was running while the alias was switched to v3 and then rolled back to v2.
+
+7. Atomically switch the alias from v2 to v3
+
+curl -s -u 'elastic:ePS5j28X' \
+-X POST 'http://localhost:9200/_aliases' \
+-H 'Content-Type: application/json' \
+-d '{"actions":[{"remove":{"index":"work_items_v2","alias":"work_items_current"}},{"add":{"index":"work_items_v3","alias":"work_items_current"}}]}'
+
+Result: The alias switch command was executed.
+
+Concept: Elasticsearch processes the remove and add actions in one aliases request, avoiding a deliberate gap between the two alias configurations.
+
+8. Roll back the alias from v3 to v2
+
+curl -s -u 'elastic:ePS5j28X' \
+-X POST 'http://localhost:9200/_aliases' \
+-H 'Content-Type: application/json' \
+-d '{"actions":[{"remove":{"index":"work_items_v3","alias":"work_items_current"}},{"add":{"index":"work_items_v2","alias":"work_items_current"}}]}'
+
+Result: The rollback command was executed.
+
+Concept: Because the alias points back to the previous index, the application can return to the old index without rebuilding it during the rollback.
+
+9. Summarize load-test results
+
+awk '{total++; if ($2 != 200) failed++; codes[$2]++} END {printf "Total requests: %d\nFailed requests: %d\nSuccessful HTTP 200: %d\n", total, failed, codes[200]; for (c in codes) printf "HTTP %s: %d\n", c, codes[c]}' /tmp/day25-load.log
+
+Actual output:
+
+Total requests: 1200
+Failed requests: 0
+Successful HTTP 200: 1200
+HTTP 200: 1200
+
+Load-test result
+
+Metric
+
+Result
+
+Total requests
+
+1,200
+
+HTTP 200
+
+1,200
+
+Failed requests
+
+0
+
+Success rate
+
+100%
+
+The test observed zero failed requests across the period containing the alias switch and rollback.
+
+Lessons learned
+
+Create a new index for incompatible mapping changes. Some field mapping changes cannot safely be applied to an existing index.
+
+Use asynchronous sliced reindexing for large indexes. Slicing divides the work and lets us monitor progress through the Tasks API.
+
+Verify counts before switching. Matching document counts provide a useful basic check, though they do not prove every field's contents match.
+
+Use an alias for application searches. The application can query a stable alias rather than hardcoding a physical index name.
+
+Switch aliases atomically. Remove the old target and add the new target in a single aliases request.
+
+Keep rollback simple. Retaining the old index allows the alias to be switched back.
+
+Measure downtime instead of assuming it. The load test recorded 1,200 HTTP 200 responses and zero failures. This proves no failed responses were observed during the measured test window; it does not independently identify which requests overlapped each alias operation.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 26 — React Work-Item List: useState + useEffect + fetch
+
+Terminal Commands
+
+1. Install frontend dependencies
+
+npm install
+
+Result: Installed the Vite React frontend dependencies successfully.
+
+2. Start required Docker containers
+
+docker start minitrack-rabbitmq
+
+docker start es-local-dev
+
+Result: Started the RabbitMQ and Elasticsearch containers.
+
+3. Check backend process
+
+pgrep -af 'node.*src/server.mjs'
+
+Result: Confirmed the Node backend process was running.
+
+4. Inspect backend environment configuration
+
+grep -n 'dotenv\|process.env' src/server.mjs
+
+Result: Checked how the backend reads environment variables. The server file did not load dotenv.
+
+5. Start the React frontend
+
+Run from the frontend directory:
+
+npm run dev
+
+Result: Vite started at http://localhost:5173/.
+
+6. Verify Elasticsearch authentication
+
+curl -s -u "elastic:$ES_PASSWORD" http://localhost:9200
+
+Result: Elasticsearch returned cluster information successfully.
+
+7. Verify Elasticsearch documents
+
+curl -s -u "elastic:$ES_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -X GET 'http://localhost:9200/work_items_current/_search' \
+  -d '{"size":3,"_source":["id","title"],"query":{"match_all":{}}}'
+
+Result: Elasticsearch returned work-item documents.
+
+8. Test the backend search endpoint
+
+curl -s 'http://localhost:3000/search?q=task&size=5'
+
+Result: Search returned matching work items and facets.
+
+curl -s 'http://localhost:3000/search?q=project&size=5'
+
+Result: Search returned matching project-related work items.
+
+curl -s 'http://localhost:3000/search?q=baseline&size=5'
+
+curl -s 'http://localhost:3000/search?q=digest&size=5'
+
+curl -s 'http://localhost:3000/search?q=ta&size=5'
+
+Result: These queries returned zero matching items. This was useful for identifying that a working search request does not necessarily mean matching results exist.
+
+Implementation and Browser Verification
+
+The following work was performed by editing files, not through terminal commands.
+
+Configured the Vite proxy to forward /api requests to the backend at localhost:3000.
+
+Created the work-item list using useState, useEffect, and fetch.
+
+Added a title filter that triggers a new fetch whenever the query changes.
+
+Added an artificial delay to short queries to reproduce out-of-order responses.
+
+Deliberately mutated the existing item and array to demonstrate stale React state.
+
+Enabled React StrictMode and observed the extra effect execution in development.
+
+Used array indexes as list keys and added temporary row-note inputs.
+
+Tested reversing the list to demonstrate why index keys can associate row state with the wrong item.
+
+Observed Results
+
+Race condition: Older, slower search requests could overwrite newer results because there was no cleanup or stale-response protection.
+
+Mutation: Updating an existing item and calling setItems(items) did not reliably trigger a render because the array reference stayed the same.
+
+StrictMode: The initial list request appeared twice in the Network tab during development.
+
+Index keys: Reordering the list could cause temporary input values to remain associated with the wrong work item.
+
+Result
+
+The deliberately buggy React implementation was created and the four intended React failure cases were explored. This is the learning version; the bugs are intentional and have not yet been replaced with the corrected implementation.
+
+# Day – Build / Ship: React Fetching Bugs and TanStack Query
+
+1. Objective
+
+Build the MiniTrack work-item list using React useState + useEffect + fetch, reproduce four intentional bugs, and then fix them using TanStack Query and immutable React updates.
+
+2. Commands executed
+
+Install TanStack Query
+
+npm install @tanstack/react-query
+
+Output:
+
+added 4 packages
+
+Inspect frontend structure
+
+find src -maxdepth 3 -type f
+
+Output:
+
+src/App.jsx
+src/App.css
+src/main.jsx
+src/index.css
+src/assets/vite.svg
+src/assets/react.svg
+src/assets/hero.png
+
+Build the frontend
+
+npm run build
+
+Output:
+
+vite v8.3.5 building client environment for production...
+✓ 64 modules transformed.
+computing gzip size...
+dist/index.html                   0.45 kB │ gzip:  0.29 kB
+dist/assets/index-D7UPjfHN.css    4.10 kB │ gzip:  1.47 kB
+dist/assets/index-D7UPjfHN.js   226.91 kB │ gzip: 70.73 kB
+
+✓ built in 360ms
+
+Start frontend development server
+
+npm run dev
+
+Result: Vite development server started. Frontend opened in the browser.
+
+3. Four intentional React bugs reproduced
+
+Bug 1: Race condition
+
+Typed pr and quickly changed it to project.
+
+The pr request had a longer artificial delay.
+
+The newer project request completed first.
+
+The older pr request completed later and overwrote the newer results.
+
+Root cause: Responses were applied in completion order instead of ensuring the displayed data matched the latest query.
+
+Bug 2: Direct state mutation
+
+Modified the first item's title directly.
+
+Reused the existing array reference with setItems(items).
+
+React did not render the expected update immediately.
+
+A forced state update made the changed title visible.
+
+Root cause: Existing state objects and arrays were mutated instead of creating new references.
+
+Bug 3: StrictMode double fetch
+
+React StrictMode was enabled in main.jsx.
+
+Observed duplicate initial API requests in the Network tab.
+
+Root cause: React StrictMode performs an additional setup/cleanup cycle for effects in development to expose unsafe effect logic.
+
+Bug 4: Index as React key
+
+Entered temporary notes against different work items.
+
+Reversed the list.
+
+Observed that row-local input state could become associated with the wrong item.
+
+Root cause: Array indexes are not stable identities when list items are reordered.
+
+4. TanStack Query implementation
+
+Installed and configured QueryClient and QueryClientProvider.
+
+Created:
+
+src/lib/queryProfiles.js
+
+src/lib/workItemQueries.js
+
+Updated src/App.jsx to use useQuery and useQueryClient.
+
+Query keys
+
+Work-item listing:
+
+['work-items', 'list', { page, limit, sort }]
+
+Search:
+
+['work-items', 'search', {
+  q,
+  state,
+  assignee_id,
+  project_id,
+  priority,
+  created_from,
+  created_to,
+  label,
+  size,
+  cursor
+}]
+
+Every filter and pagination input is represented in the query key.
+
+Shared cache profiles
+
+export const queryProfiles = {
+  workItems: {
+    staleTime: 30_000,
+  },
+  search: {
+    staleTime: 10_000,
+  },
+}
+
+All stale-time configuration is centralized in shared profiles.
+
+5. Verification results
+
+Test
+
+Result
+
+Search race condition
+
+Passed
+
+Immutable item update
+
+Passed
+
+Stable item keys after reversing
+
+Passed
+
+StrictMode initial request
+
+One request observed
+
+Search query keys
+
+Implemented with all filters
+
+Listing query keys
+
+Includes page, limit and sort
+
+Loading state
+
+Tested
+
+Error state
+
+Tested
+
+Empty state
+
+Tested
+
+Production build
+
+Passed
+
+StrictMode final verification
+
+After removing the AbortSignal from the fetch function, corrected the query functions and refreshed the browser.
+
+Observed result: One initial work-item listing request in the Network tab.
+
+6. Final outcome
+
+Successfully reproduced the four original React problems and implemented fixes using TanStack Query, immutable cache updates, stable React keys, shared cache profiles, and distinct loading/error/empty UI states.
+
+Status: Build and Ship completed.
+
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+# Day 27 — TanStack Query: The Cache Is the State
+
+BUILD / SHIP
+
+Refactored the MiniTrack work-item list to TanStack Query.
+
+# 1. Code implemented
+
+Configured QueryClientProvider in main.jsx.
+
+Created frontend/src/lib/workItemQueries.js.
+
+Created frontend/src/lib/queryProfiles.js.
+
+Created a query-key factory for work-item lists and searches.
+
+Included filters and pagination parameters in query keys.
+
+Used shared cache profiles instead of per-hook cache timing values.
+
+Added AbortSignal support to fetch functions.
+
+Implemented mutation handling using useMutation.
+
+Invalidated work-item queries after successful mutations.
+
+Added loading skeleton.
+
+Added error state with Retry button.
+
+Added empty state with a call to action.
+
+Used key={item.id} instead of array index for work-item rows.
+
+# 2. Terminal commands and outputs
+
+Command 1 — Production build
+
+npm --prefix frontend run build
+
+Observed output:
+
+65 modules transformed.
+Production build completed successfully.
+
+Command 2 — Frontend lint
+
+npm --prefix frontend run lint
+
+Observed result:
+
+Lint passed.
+No lint errors.
+
+Command 3 — Inspect query/filter implementation
+
+grep -nE 'workItemQueries.list|state|URLSearchParams|filters' frontend/src/App.jsx
+
+Observed relevant output:
+
+9:  state: '',
+23:  const [filters, setFilters] = useState(initialFilters)
+29:  const isSearching = Object.entries(filters).some(
+42:    () => ({ ...filters, q: filters.q.trim() }),
+47:    ...workItemQueries.list(listParams),
+123:            ['state', 'State'],
+134:                value={filters[name]}
+
+This confirmed that filter values are maintained in React state and passed into the query selection logic.
+
+Command 4 — Inspect query selection and parameters
+
+sed -n '25,52p' frontend/src/App.jsx
+
+Important code observed:
+
+const listParams = useMemo(
+  () => ({ page, limit, sort }),
+  [page, limit, sort],
+)
+
+const searchParams = useMemo(
+  () => ({ ...filters, q: filters.q.trim() }),
+  [filters],
+)
+
+const listQuery = useQuery({
+  ...workItemQueries.list(listParams),
+  enabled: !isSearching,
+})
+
+const searchQuery = useQuery({
+  ...workItemQueries.search(searchParams),
+  enabled: isSearching,
+})
+
+Explanation:
+
+List query identity includes page, limit and sort.
+
+Search query identity includes the filters, search text, size and cursor.
+
+Changing parameters creates a different query key.
+
+# 3. Four documented failures — browser tests
+
+Test 1: Stale list after mutation
+
+Action:
+
+Clicked Edit first item.
+
+Observed:
+
+The title updated automatically.
+
+(edited) appeared in the title.
+
+No manual browser refresh was required.
+
+Result: PASSED.
+
+Test 2: Search race condition
+
+Action:
+
+Searched for Daily.
+
+Immediately changed the search to Bug.
+
+Observed:
+
+Latest search results remained displayed.
+
+Older results did not overwrite the latest results.
+
+Result: PASSED.
+
+Test 3: StrictMode duplicate request lifecycle
+
+Action:
+
+Opened Chrome DevTools → Network.
+
+Reloaded the page.
+
+Observed:
+
+First request:  (canceled) — 6 ms
+Second request: 200 — 116 ms
+
+Explanation:
+
+React StrictMode exercises the mount and cleanup lifecycle in development.
+
+The first request was cancelled.
+
+The replacement request completed successfully.
+
+Result: PASSED.
+
+Test 4: Index key row-state corruption
+
+Action:
+
+Entered temporary notes in work-item rows.
+
+Clicked Reverse list.
+
+Observed:
+
+Notes remained attached to their original work items.
+
+Notes moved with their respective items rather than staying in their previous row positions.
+
+Result: PASSED.
+
+Explanation:
+
+Stable item IDs are used as React keys.
+
+React can correctly preserve row identity when the list is reordered.
+
+# 4. Query-key acceptance test
+
+Action:
+
+Changed State filter from blank to done.
+
+Watched Chrome DevTools → Network.
+
+Observed requests:
+
+search?state=d&size=20
+search?state=do&size=20
+search?state=don&size=20
+search?state=done&size=20
+
+Some requests returned HTTP 200 and the repeated final query returned HTTP 304.
+
+Explanation:
+
+Filter values are included in the search query parameters.
+
+Different filter combinations have different query identities.
+
+Returning to an earlier combination can reuse its cached response.
+
+Result: PASSED.
+
+# 5. Loading, error and empty UI tests
+
+Loading skeleton
+
+Action:
+
+Set Network throttling to 3G.
+
+Reloaded the page.
+
+Observed:
+
+Skeleton rows appeared while the request was loading.
+
+Result: PASSED.
+
+Error state
+
+Action:
+
+Set Network to Offline.
+
+Reloaded the page.
+
+Observed:
+
+Error message appeared.
+
+Retry button appeared.
+
+Result: PASSED.
+
+Empty state
+
+Action:
+
+Searched for xyznonexistent999.
+
+Observed:
+
+No work items found message appeared.
+
+Clear filters and start again CTA appeared.
+
+Result: PASSED.
+
