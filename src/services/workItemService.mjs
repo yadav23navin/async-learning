@@ -1,7 +1,13 @@
+
 import AppError from "../AppError.mjs";
 import escapeHtml from "../sanitize.mjs";
-import { buildInvalidationSet } from "../cacheInvalidation.mjs";
-import { invalidateCacheKeys } from "../cacheInvalidation.mjs";
+import {
+    buildInvalidationSet,
+    invalidateCacheKeys
+} from "../cacheInvalidation.mjs";
+import esClient from "../elasticsearchClient.mjs";
+
+const INDEX = "work_items_current";
 
 const createWorkItemService = ({
     workItemRepository,
@@ -9,9 +15,39 @@ const createWorkItemService = ({
     publishEvent = async () => {},
     invalidateKeys = invalidateCacheKeys
 }) => {
+    // Sync a created or updated work item to Elasticsearch.
+    // Best-effort: an ES failure must not turn a successful DB write into an API failure.
+    const syncToElasticsearch = async (workItem) => {
+        try {
+            await esClient.index({
+                index: INDEX,
+                id: String(workItem.id),
+                document: workItem
+            });
+        } catch (error) {
+            console.error("Elasticsearch indexing failed:", error.message);
+        }
+    };
+
+    // Remove a deleted work item from Elasticsearch.
+    const removeFromElasticsearch = async (id) => {
+        try {
+            await esClient.delete({
+                index: INDEX,
+                id: String(id)
+            });
+        } catch (error) {
+            if (error.meta?.statusCode !== 404) {
+                console.error("Elasticsearch deletion failed:", error.message);
+            }
+        }
+    };
+
     const invalidate = async (projectId, operation) => {
         try {
-            await invalidateKeys(buildInvalidationSet("workItem", { projectId, operation }));
+            await invalidateKeys(
+                buildInvalidationSet("workItem", { projectId, operation })
+            );
         } catch (cause) {
             const error = new AppError(
                 "The work-item write succeeded, but cache invalidation failed. The record is committed; check it before retrying.",
@@ -41,6 +77,8 @@ const createWorkItemService = ({
         };
 
         const created = await workItemRepository.create(workItem);
+
+        await syncToElasticsearch(created);
         await invalidate(projectId, "create");
 
         await publishEvent("work_item.created", {
@@ -52,20 +90,22 @@ const createWorkItemService = ({
         return created;
     };
 
-    const findAll =async ({page,limit,sort}) => {
+    const findAll = async ({ page, limit, sort }) => {
         return await workItemRepository.findAll({
-            page, limit, sort                                  // now service will support pagination and sorting, so it can pass page, limit, and sort parameters to the repository    
+            page,
+            limit,
+            sort
         });
     };
 
     const findAllCursor = async ({ cursor, limit }) => {
-    return await workItemRepository.findAllCursor({
-        cursor,
-        limit
-    });
-};
+        return await workItemRepository.findAllCursor({
+            cursor,
+            limit
+        });
+    };
 
-    const findById = async(id) => {
+    const findById = async (id) => {
         const workItem = await workItemRepository.findById(id);
 
         if (!workItem) {
@@ -100,6 +140,8 @@ const createWorkItemService = ({
             );
         }
 
+        await syncToElasticsearch(workItem);
+
         await invalidate(
             workItem.project_id ?? workItem.projectId,
             data.assignee_id !== undefined ? "assign" : "update-title"
@@ -128,17 +170,22 @@ const createWorkItemService = ({
             );
         }
 
-        await invalidate(workItem.project_id ?? workItem.projectId, "delete");
+        await removeFromElasticsearch(workItem.id);
+        await invalidate(
+            workItem.project_id ?? workItem.projectId,
+            "delete"
+        );
+
         return workItem;
     };
 
     return {
         create,
         findAll,
+        findAllCursor,
         findById,
         update,
-        remove,
-        findAllCursor
+        remove
     };
 };
 

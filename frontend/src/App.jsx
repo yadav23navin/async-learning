@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { workItemQueries, workItemKeys } from './lib/workItemQueries'
-import { useUpdateWorkItem } from './lib/useUpdateWorkItem'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query'
+import { workItemQueries } from './lib/workItemQueries'
+import { useWorkItemActions } from './lib/useWorkItemActions'
 import './App.css'
 
 const initialFilters = {
@@ -18,14 +18,15 @@ const initialFilters = {
 }
 
 function App() {
-  const queryClient = useQueryClient()
-  const updateMutation = useUpdateWorkItem()
+  const actions = useWorkItemActions()
 
   const [filters, setFilters] = useState(initialFilters)
-  const [page, setPage] = useState(1)
   const [limit] = useState(20)
-  const [sort] = useState('created_at_desc')
   const [reversed, setReversed] = useState(false)
+  const [createTitle, setCreateTitle] = useState('')
+  const [createProjectId, setCreateProjectId] = useState('')
+
+  const loadMoreRef = useRef(null)
 
   const isSearching = Object.entries(filters).some(
     ([key, value]) =>
@@ -34,18 +35,13 @@ function App() {
       String(value).trim() !== '',
   )
 
-  const listParams = useMemo(
-    () => ({ page, limit, sort }),
-    [page, limit, sort],
-  )
-
   const searchParams = useMemo(
     () => ({ ...filters, q: filters.q.trim() }),
     [filters],
   )
 
-  const listQuery = useQuery({
-    ...workItemQueries.list(listParams),
+  const infiniteQuery = useInfiniteQuery({
+    ...workItemQueries.infinite({ limit }),
     enabled: !isSearching,
   })
 
@@ -54,13 +50,43 @@ function App() {
     enabled: isSearching,
   })
 
-  const activeQuery = isSearching ? searchQuery : listQuery
+  const activeQuery = isSearching ? searchQuery : infiniteQuery
 
   const items = isSearching
-    ? activeQuery.data?.data?.items ?? []
-    : activeQuery.data?.data ?? []
+    ? searchQuery.data?.data?.items ?? []
+    : infiniteQuery.data?.pages.flatMap((page) => page.data ?? []) ?? []
 
   const visibleItems = reversed ? [...items].reverse() : items
+
+  const {
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  } = infiniteQuery
+
+  useEffect(() => {
+    const element = loadMoreRef.current
+
+    if (!element || isSearching || !hasNextPage) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && !isFetchingNextPage) {
+          fetchNextPage()
+        }
+      },
+      { rootMargin: '200px' },
+    )
+
+    observer.observe(element)
+
+    return () => observer.disconnect()
+  }, [
+    isSearching,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  ])
 
   function updateFilter(name, value) {
     setFilters((current) => ({
@@ -68,33 +94,30 @@ function App() {
       [name]: value,
       cursor: '',
     }))
-    setPage(1)
-  }
-
-  function editFirstItem() {
-    if (!items.length || updateMutation.isPending) return
-
-    const item = items[0]
-
-    updateMutation.mutate({
-      id: item.id,
-      title: `${item.title.replace(/ \(edited\)$/, '')} (edited)`,
-    })
   }
 
   function clearFilters() {
     setFilters(initialFilters)
-    setPage(1)
+  }
+
+  function editItem(item) {
+    const title =
+      item.title.replace(/ \(edited\)$/, '') + ' (edited)'
+
+    actions.updateItem(item.id, title)
+  }
+
+  function createItem(event) {
+    event.preventDefault()
+
+    if (!createProjectId || !createTitle.trim()) return
+
+    actions.createItem(Number(createProjectId), createTitle.trim())
+    setCreateTitle('')
   }
 
   function retryQuery() {
     activeQuery.refetch()
-  }
-
-  function showCreateAction() {
-    setFilters(initialFilters)
-    setPage(1)
-    document.getElementById('filter')?.focus()
   }
 
   return (
@@ -108,13 +131,66 @@ function App() {
         <span className="status-pill">TanStack Query v5</span>
       </header>
 
+      {actions.toast && (
+        <div
+          className={
+            actions.toast.type === 'error'
+              ? 'error-message'
+              : 'success-message'
+          }
+          role="alert"
+        >
+          {actions.toast.message}
+          <button
+            className="secondary"
+            onClick={actions.dismissToast}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <section className="toolbar">
+        <form className="actions" onSubmit={createItem}>
+          <label>
+            Project ID
+            <input
+              type="number"
+              min="1"
+              value={createProjectId}
+              onChange={(event) =>
+                setCreateProjectId(event.target.value)
+              }
+              placeholder="Project ID"
+              required
+            />
+          </label>
+
+          <label>
+            New work item
+            <input
+              value={createTitle}
+              onChange={(event) =>
+                setCreateTitle(event.target.value)
+              }
+              placeholder="Work item title"
+              required
+            />
+          </label>
+
+          <button disabled={actions.isPending}>
+            Create item
+          </button>
+        </form>
+
         <label className="search-field" htmlFor="filter">
           Search title
           <input
             id="filter"
             value={filters.q}
-            onChange={(event) => updateFilter('q', event.target.value)}
+            onChange={(event) =>
+              updateFilter('q', event.target.value)
+            }
             placeholder="Search work items..."
           />
         </label>
@@ -133,7 +209,9 @@ function App() {
               {label}
               <input
                 value={filters[name]}
-                onChange={(event) => updateFilter(name, event.target.value)}
+                onChange={(event) =>
+                  updateFilter(name, event.target.value)
+                }
                 placeholder={label}
               />
             </label>
@@ -141,28 +219,22 @@ function App() {
         </div>
 
         <div className="actions">
-          <button className="secondary" onClick={clearFilters}>
+          <button
+            className="secondary"
+            onClick={clearFilters}
+          >
             Clear filters
           </button>
+
           <button
-            onClick={editFirstItem}
-            disabled={!items.length || updateMutation.isPending}
+            className="secondary"
+            onClick={() =>
+              setReversed((value) => !value)
+            }
           >
-            {updateMutation.isPending ? 'Saving...' : 'Edit first item'}
-          </button>
-          <button className="secondary" onClick={() => setReversed((value) => !value)}>
             Reverse list
           </button>
         </div>
-
-        {updateMutation.isError && (
-          <p className="error-message" role="alert">
-            Update failed: {updateMutation.error.message}
-          </p>
-        )}
-        {updateMutation.isSuccess && (
-          <p className="success-message">Work item updated successfully.</p>
-        )}
       </section>
 
       <section className="results">
@@ -170,14 +242,22 @@ function App() {
           <div>
             <h2>Results</h2>
             <p className="muted">
-              {activeQuery.isFetching ? 'Refreshing data...' : 'Your latest work items'}
+              {activeQuery.isFetching
+                ? 'Refreshing data...'
+                : 'Your latest work items'}
             </p>
           </div>
-          <span className="count">{items.length} items</span>
+
+          <span className="count">
+            {items.length} items loaded
+          </span>
         </div>
 
         {activeQuery.isPending && (
-          <div className="skeleton-list" aria-label="Loading work items">
+          <div
+            className="skeleton-list"
+            aria-label="Loading work items"
+          >
             {Array.from({ length: 5 }).map((_, index) => (
               <div className="skeleton-row" key={index}>
                 <div className="skeleton-id" />
@@ -199,7 +279,7 @@ function App() {
           <div className="state-panel">
             <h3>No work items found</h3>
             <p>Try changing your search or clearing the filters.</p>
-            <button onClick={showCreateAction}>Clear filters and start again</button>
+            <button onClick={clearFilters}>Clear filters</button>
           </div>
         )}
 
@@ -209,36 +289,51 @@ function App() {
               <li className="work-item" key={item.id}>
                 <span className="item-id">#{item.id}</span>
                 <span className="item-title">{item.title}</span>
-                <input aria-label={`Temporary note for work item ${item.id}`} placeholder="Temporary row note" />
+
+                <div className="actions">
+                  <button
+                    className="secondary"
+                    disabled={actions.isPending || item.optimistic}
+                    onClick={() => editItem(item)}
+                  >
+                    Edit
+                  </button>
+
+                  <button
+                    className="secondary"
+                    disabled={actions.isPending || item.optimistic}
+                    onClick={() => actions.deleteItem(item.id)}
+                  >
+                    Delete
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
         )}
 
         {!isSearching && (
-          <div className="pagination">
-            <button
-              className="secondary"
-              disabled={page === 1}
-              onClick={() => setPage((current) => current - 1)}
-            >
-              Previous
-            </button>
-            <span>Page {page}</span>
-            <button
-              className="secondary"
-              disabled={!listQuery.data || page >= listQuery.data.total_pages}
-              onClick={() => setPage((current) => current + 1)}
-            >
-              Next
-            </button>
+          <div
+            ref={loadMoreRef}
+            className="pagination"
+          >
+            {infiniteQuery.isFetchingNextPage && (
+              <p>Loading more work items...</p>
+            )}
+
+            {!infiniteQuery.hasNextPage && items.length > 0 && (
+              <p>You've reached the end of the list.</p>
+            )}
           </div>
         )}
       </section>
 
       <footer className="debug-info">
         <span>Query status: {activeQuery.status}</span>
-        <span>Fetching: {activeQuery.isFetching ? 'Yes' : 'No'}</span>
+        <span>
+          Fetching: {activeQuery.isFetching ? 'Yes' : 'No'}
+        </span>
+        <span>Loaded: {items.length}</span>
       </footer>
     </main>
   )

@@ -4823,3 +4823,128 @@ Clear filters and start again CTA appeared.
 
 Result: PASSED.
 
+=========================================================================================================================================================================================================================================================================================================================================================================================================================================================
+
+Day 28 — Mutations, Optimistic UI & Infinite Scroll
+
+1. Start the backend
+
+Command:
+
+ES_PASSWORD='ePS5j28X' npm run dev
+
+Observed output:
+
+Redis connected successfully.
+
+RabbitMQ publisher connected successfully.
+
+API server started on port 3000.
+
+Why: The frontend needs the backend API, and Elasticsearch needs its password to authenticate.
+
+2. Run backend tests
+
+Command:
+
+npm test
+
+Observed output:
+
+21 tests passed
+0 tests failed
+
+Note: Elasticsearch authentication warnings appeared in the test output because the test runner did not have ES_PASSWORD set. The tests still passed.
+
+3. Check frontend lint
+
+Directory: frontend
+
+Command:
+
+npm run lint
+
+Observed output:
+
+> frontend@0.0.0 lint
+> eslint .
+
+No lint errors were reported.
+
+4. Build the frontend
+
+Directory: frontend
+
+Command:
+
+npm run build
+
+Observed output:
+
+✓ 65 modules transformed.
+
+dist/index.html                  0.45 kB
+dist/assets/index-DizEKMFt.css   3.51 kB
+dist/assets/index-DPhkqTY_.js   234.87 kB
+
+✓ built in 236ms
+
+Why: Confirms that the React application can be compiled for production.
+
+5. Verify live Elasticsearch synchronization
+
+During testing, we created, updated and deleted work items through the API.
+
+Observed results:
+
+Created work item 500369.
+
+Elasticsearch returned found: true for the created item.
+
+Updated its title to Day 28 Elasticsearch update test.
+
+Elasticsearch showed _version: 2 and the updated title.
+
+Deleted work item 500369.
+
+API returned:
+
+{
+  "success": true
+}
+
+Why: Confirms that successful create and update operations were reflected in Elasticsearch.
+
+6. Inspect mutation invalidation
+
+Command:
+
+grep -nE 'workItemKeys|invalidateQueries|cancelQueries|setQueriesData' frontend/src/lib/useWorkItemActions.js frontend/src/lib/workItemQueries.js
+
+Why: workItemKeys.all scopes cache operations to work-item queries. Mutations can affect normal lists, infinite lists and search results, so invalidating this family is justified.
+
+7. Browser testing — infinite scroll
+
+Using Chrome DevTools → Network → Fetch/XHR:
+
+Excluded the first and last 304 responses.
+
+Confirmed 10 successful 200 responses.
+
+Requests used cursor pagination with limit=20.
+
+Scrolled through all 10 pages.
+
+Result: 10 successful page responses confirmed.
+
+8. Browser testing — visible duplicate IDs
+
+The first two Console selectors returned no useful IDs because the DOM did not use the expected attributes.
+
+The final Console check returned:
+
+total: 20
+unique: 20
+duplicates: 0
+
+Important: This checks the 20 IDs visible at that moment, not all 200 records together.
